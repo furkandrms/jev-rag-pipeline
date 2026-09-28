@@ -41,11 +41,16 @@ pip install -r requirements.txt
 
 cp .env.example .env
 # fill in OPENAI_API_KEY or ANTHROPIC_API_KEY, and optionally TYPESAFE_API_KEY
-export $(grep -v '^#' .env | xargs)
 
 python chat.py        # terminal REPL
 # or
 uvicorn app:app --reload   # web UI at http://127.0.0.1:8000
+```
+
+`.env` is loaded automatically (via `python-dotenv`, in `pipeline_setup.py`) --
+no manual `export` step needed. If you exported these as real shell/CI
+environment variables instead, that still works too; `.env` never
+overrides a variable that's already set.
 ```
 
 ## Example session

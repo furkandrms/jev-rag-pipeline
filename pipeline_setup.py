@@ -8,6 +8,8 @@ from __future__ import annotations
 import os
 import sys
 
+from dotenv import load_dotenv
+
 from corpus import DOCUMENTS
 
 from rag_guard import Chunk, RagGuard
@@ -18,6 +20,12 @@ from rag_guard.decision_model import (
     OpenAIDecisionModel,
 )
 from rag_guard.pipeline import GenerateFn
+
+# Loads .env into the process environment automatically, so `python chat.py`
+# / `uvicorn app:app` work right after `cp .env.example .env` -- no manual
+# `export $(...)` step to forget. Does nothing (safely) if .env is absent;
+# never overrides a variable already set in the real environment.
+load_dotenv()
 
 COLLECTION_NAME = "nimbus_docs"
 TOP_K = 4
