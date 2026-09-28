@@ -10,3 +10,5 @@ python-dotenv>=1.0
 # web UI (app.py)
 fastapi>=0.110
 uvicorn[standard]>=0.29
+python-multipart>=0.0.9   # required by FastAPI for file uploads (UploadFile)
+pypdf>=4.0                 # PDF text extraction for /api/upload

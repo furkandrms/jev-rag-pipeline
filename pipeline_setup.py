@@ -29,6 +29,7 @@ load_dotenv()
 
 COLLECTION_NAME = "nimbus_docs"
 TOP_K = 4
+UPLOAD_COLLECTION_PREFIX = "session_"
 
 SYSTEM_PROMPT = (
     "You are a support assistant for Nimbus, a fictional data platform. "
@@ -36,16 +37,122 @@ SYSTEM_PROMPT = (
     "doesn't contain the answer, say so plainly -- do not guess."
 )
 
+UPLOAD_SYSTEM_PROMPT = (
+    "Answer the question using only the context below, which comes from a "
+    "document the user uploaded. If the context doesn't contain the "
+    "answer, say so plainly -- do not guess."
+)
+
+_chroma_client = None
+
+
+def get_chroma_client():
+    """One in-memory chromadb client shared by the whole process.
+
+    Both the built-in Nimbus collection and every per-session upload
+    collection live in this same client -- a fresh `chromadb.Client()` per
+    call would give each its own isolated (and immediately-orphaned)
+    in-memory store instead of a shared one.
+    """
+    global _chroma_client
+    if _chroma_client is None:
+        import chromadb
+
+        _chroma_client = chromadb.Client()
+    return _chroma_client
+
 
 def build_vector_store():
-    import chromadb
-
-    client = chromadb.Client()
+    client = get_chroma_client()
     collection = client.get_or_create_collection(COLLECTION_NAME)
     if collection.count() == 0:
         ids, texts = zip(*DOCUMENTS)
         collection.add(ids=list(ids), documents=list(texts))
     return collection
+
+
+def session_collection_name(session_id: str) -> str:
+    return f"{UPLOAD_COLLECTION_PREFIX}{session_id}"
+
+
+def replace_session_document(session_id: str, filename: str, chunks: list[str]):
+    """Replace whatever this session previously uploaded with a fresh set of chunks.
+
+    One document per session, by design -- re-uploading swaps it out rather
+    than accumulating, so a session's retrieval results are always "the
+    current document," never a growing mix of everything ever uploaded.
+    """
+    client = get_chroma_client()
+    name = session_collection_name(session_id)
+    try:
+        client.delete_collection(name)
+    except Exception:
+        pass  # nothing to delete yet
+    collection = client.create_collection(name)
+    ids = [f"{filename}-{i}" for i in range(len(chunks))]
+    collection.add(ids=ids, documents=chunks)
+    return collection
+
+
+def get_session_collection(session_id: str):
+    """Returns the session's upload collection, or None if it has none yet."""
+    client = get_chroma_client()
+    name = session_collection_name(session_id)
+    try:
+        collection = client.get_collection(name)
+    except Exception:
+        return None
+    return collection if collection.count() > 0 else None
+
+
+def chunk_text(text: str, chunk_size: int = 800, overlap: int = 100) -> list[str]:
+    """Paragraph-aware chunking: pack whole paragraphs up to chunk_size,
+    and only hard-split a paragraph that's longer than chunk_size on its own
+    (with overlap, so a sentence spanning a hard split isn't fully lost).
+    Not a claim to sophistication -- a deliberately simple, inspectable
+    baseline for testing rag-guard's checks against real chunked content.
+    """
+    paragraphs = [p.strip() for p in text.replace("\r\n", "\n").split("\n\n") if p.strip()]
+    chunks: list[str] = []
+    current = ""
+
+    def flush():
+        nonlocal current
+        if current:
+            chunks.append(current)
+            current = ""
+
+    for para in paragraphs:
+        if len(para) > chunk_size:
+            flush()
+            start = 0
+            while start < len(para):
+                end = start + chunk_size
+                chunks.append(para[start:end])
+                start = end - overlap
+            continue
+        candidate = f"{current}\n\n{para}" if current else para
+        if len(candidate) <= chunk_size:
+            current = candidate
+        else:
+            flush()
+            current = para
+    flush()
+    return chunks
+
+
+def extract_text(filename: str, content: bytes) -> str:
+    ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
+    if ext in ("txt", "md"):
+        return content.decode("utf-8", errors="replace")
+    if ext == "pdf":
+        import io
+
+        from pypdf import PdfReader
+
+        reader = PdfReader(io.BytesIO(content))
+        return "\n\n".join(page.extract_text() or "" for page in reader.pages)
+    raise ValueError(f"Unsupported file type: .{ext or '?'} (supported: .txt, .md, .pdf)")
 
 
 def make_retriever(collection):
@@ -64,50 +171,20 @@ def make_retriever(collection):
     return retrieve
 
 
-def make_generate_fn() -> tuple[str, GenerateFn, DecisionModel]:
-    """Pick the LLM that generates answers, and the decision model it also backs by default."""
+def make_client() -> tuple[str, object]:
+    """Pick and construct the one LLM client used for both generation and,
+    unless Jev is configured, the decision model too -- shared rather than
+    built twice, since it's the same account/credentials either way.
+    """
     if os.environ.get("OPENAI_API_KEY"):
         from openai import OpenAI
 
-        client = OpenAI()
-
-        def generate(query: str, chunks: list[Chunk]) -> str:
-            context = "\n\n".join(f"[{c.id}] {c.text}" for c in chunks)
-            response = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {
-                        "role": "user",
-                        "content": f"{SYSTEM_PROMPT}\n\nContext:\n{context}\n\nQuestion: {query}",
-                    }
-                ],
-            )
-            return response.choices[0].message.content
-
-        return "openai", generate, OpenAIDecisionModel(client=client)
+        return "openai", OpenAI()
 
     if os.environ.get("ANTHROPIC_API_KEY"):
         import anthropic
 
-        client = anthropic.Anthropic()
-
-        def generate(query: str, chunks: list[Chunk]) -> str:
-            context = "\n\n".join(f"[{c.id}] {c.text}" for c in chunks)
-            response = client.messages.create(
-                model="claude-haiku-4-5",
-                max_tokens=300,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": f"{SYSTEM_PROMPT}\n\nContext:\n{context}\n\nQuestion: {query}",
-                    }
-                ],
-            )
-            return "".join(
-                block.text for block in response.content if getattr(block, "type", None) == "text"
-            )
-
-        return "anthropic", generate, AnthropicDecisionModel(client=client)
+        return "anthropic", anthropic.Anthropic()
 
     print(
         "Needs a real LLM to generate answers: set OPENAI_API_KEY or "
@@ -117,18 +194,77 @@ def make_generate_fn() -> tuple[str, GenerateFn, DecisionModel]:
     raise SystemExit(1)
 
 
+def build_generate_fn(backend: str, client, system_prompt: str) -> GenerateFn:
+    if backend == "openai":
+
+        def generate(query: str, chunks: list[Chunk]) -> str:
+            context = "\n\n".join(f"[{c.id}] {c.text}" for c in chunks)
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": f"{system_prompt}\n\nContext:\n{context}\n\nQuestion: {query}",
+                    }
+                ],
+            )
+            return response.choices[0].message.content
+
+        return generate
+
+    if backend == "anthropic":
+
+        def generate(query: str, chunks: list[Chunk]) -> str:
+            context = "\n\n".join(f"[{c.id}] {c.text}" for c in chunks)
+            response = client.messages.create(
+                model="claude-haiku-4-5",
+                max_tokens=300,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": f"{system_prompt}\n\nContext:\n{context}\n\nQuestion: {query}",
+                    }
+                ],
+            )
+            return "".join(
+                block.text for block in response.content if getattr(block, "type", None) == "text"
+            )
+
+        return generate
+
+    raise ValueError(f"unknown backend: {backend}")
+
+
+def make_decision_model_for_client(backend: str, client) -> DecisionModel:
+    if backend == "openai":
+        return OpenAIDecisionModel(client=client)
+    if backend == "anthropic":
+        return AnthropicDecisionModel(client=client)
+    raise ValueError(f"unknown backend: {backend}")
+
+
 def make_decision_model(fallback: DecisionModel) -> tuple[str, DecisionModel]:
     if os.environ.get("TYPESAFE_API_KEY"):
         return "jev", JevDecisionModel()
     return "same as generate_fn", fallback
 
 
-def setup() -> tuple[RagGuard, "callable", dict[str, str]]:
-    """Build everything chat.py / app.py need: (guard, retrieve, backend_info)."""
-    generate_backend, generate_fn, fallback_model = make_generate_fn()
+def setup():
+    """Build everything chat.py / app.py need.
+
+    Returns (guard, retrieve, generate_fn, upload_generate_fn, backend_info).
+    `generate_fn` answers using the Nimbus-support system prompt against the
+    demo corpus; `upload_generate_fn` uses a generic system prompt suited to
+    an arbitrary uploaded document. Both share one LLM client and, unless
+    Jev is configured, one decision model.
+    """
+    client_backend, client = make_client()
+    generate_fn = build_generate_fn(client_backend, client, SYSTEM_PROMPT)
+    upload_generate_fn = build_generate_fn(client_backend, client, UPLOAD_SYSTEM_PROMPT)
+    fallback_model = make_decision_model_for_client(client_backend, client)
     decision_backend, model = make_decision_model(fallback_model)
     collection = build_vector_store()
     retrieve = make_retriever(collection)
     guard = RagGuard(model=model)
-    backend_info = {"generate_fn": generate_backend, "decision_model": decision_backend}
-    return guard, retrieve, generate_fn, backend_info
+    backend_info = {"generate_fn": client_backend, "decision_model": decision_backend}
+    return guard, retrieve, generate_fn, upload_generate_fn, backend_info

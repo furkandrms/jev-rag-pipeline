@@ -4,6 +4,15 @@ const input = document.getElementById("query-input");
 const sendBtn = document.getElementById("send-btn");
 const template = document.getElementById("message-template");
 const badgesEl = document.getElementById("backend-badges");
+const brandTitleEl = document.getElementById("brand-title");
+const modeToggleEl = document.getElementById("mode-toggle");
+const uploadZoneEl = document.getElementById("upload-zone");
+const uploadDropEl = document.getElementById("upload-drop");
+const uploadLabelEl = document.getElementById("upload-label");
+const uploadStatusEl = document.getElementById("upload-status");
+const fileInputEl = document.getElementById("file-input");
+const introDemoEl = document.getElementById("intro-demo");
+const introUploadEl = document.getElementById("intro-upload");
 
 let thresholds = {
   relevance_threshold: 0.5,
@@ -12,11 +21,28 @@ let thresholds = {
   grounding_min_coverage: 0.8,
 };
 
+let mode = "demo"; // "demo" | "upload"
+let hasUploadedDoc = false;
+
 const ACTION_LABELS = {
   answered: "Answered",
   insufficient_context: "Insufficient context",
   ungrounded_answer_flagged: "Ungrounded — flagged",
 };
+
+// A per-browser (not per-account) session id, just enough identity to keep
+// one visitor's uploaded document out of another's -- minted once and kept
+// in localStorage, never sent anywhere but this app's own backend.
+function getSessionId() {
+  const key = "jevrag_session_id";
+  let id = localStorage.getItem(key);
+  if (!id) {
+    id = crypto.randomUUID();
+    localStorage.setItem(key, id);
+  }
+  return id;
+}
+const sessionId = getSessionId();
 
 async function loadInfo() {
   try {
@@ -31,6 +57,87 @@ async function loadInfo() {
     badgesEl.innerHTML = `<span class="backend-badge">backend info unavailable</span>`;
   }
 }
+
+function setMode(next) {
+  mode = next;
+  modeToggleEl.querySelectorAll(".mode-btn").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.mode === next);
+  });
+  uploadZoneEl.hidden = next !== "upload";
+  introDemoEl.hidden = next !== "demo";
+  introUploadEl.hidden = next !== "upload";
+  brandTitleEl.textContent = next === "demo" ? "Nimbus support" : "Your document";
+
+  if (next === "upload") {
+    input.disabled = !hasUploadedDoc;
+    input.placeholder = hasUploadedDoc
+      ? "Ask something about the uploaded document"
+      : "Upload a document above first";
+  } else {
+    input.disabled = false;
+    input.placeholder = "How do I restart the ingest service?";
+  }
+}
+
+modeToggleEl.addEventListener("click", (e) => {
+  const btn = e.target.closest(".mode-btn");
+  if (btn) setMode(btn.dataset.mode);
+});
+
+async function uploadFile(file) {
+  uploadLabelEl.textContent = `Uploading ${file.name}…`;
+  uploadStatusEl.textContent = "";
+  uploadStatusEl.className = "upload-status";
+
+  try {
+    const form = new FormData();
+    form.append("file", file);
+    const res = await fetch("/api/upload", {
+      method: "POST",
+      headers: { "X-Session-Id": sessionId },
+      body: form,
+    });
+    const data = await res.json();
+
+    if (!res.ok) {
+      throw new Error(data.detail || "Upload failed");
+    }
+
+    hasUploadedDoc = true;
+    uploadLabelEl.textContent = `Drop a .txt / .md / .pdf here, or click to choose a file`;
+    uploadStatusEl.textContent = `✓ ${data.filename} — ${data.chunk_count} chunks indexed`;
+    uploadStatusEl.className = "upload-status ok";
+    if (mode === "upload") {
+      input.disabled = false;
+      input.placeholder = "Ask something about the uploaded document";
+    }
+  } catch (e) {
+    uploadLabelEl.textContent = `Drop a .txt / .md / .pdf here, or click to choose a file`;
+    uploadStatusEl.textContent = e.message || "Upload failed";
+    uploadStatusEl.className = "upload-status error";
+  }
+}
+
+fileInputEl.addEventListener("change", () => {
+  if (fileInputEl.files[0]) uploadFile(fileInputEl.files[0]);
+});
+
+["dragenter", "dragover"].forEach((evt) =>
+  uploadDropEl.addEventListener(evt, (e) => {
+    e.preventDefault();
+    uploadDropEl.classList.add("dragover");
+  })
+);
+["dragleave", "drop"].forEach((evt) =>
+  uploadDropEl.addEventListener(evt, (e) => {
+    e.preventDefault();
+    uploadDropEl.classList.remove("dragover");
+  })
+);
+uploadDropEl.addEventListener("drop", (e) => {
+  const file = e.dataTransfer.files[0];
+  if (file) uploadFile(file);
+});
 
 function addUserMessage(text) {
   const div = document.createElement("div");
@@ -170,10 +277,15 @@ async function sendQuery(query) {
   try {
     const res = await fetch("/api/chat", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query }),
+      headers: { "Content-Type": "application/json", "X-Session-Id": sessionId },
+      body: JSON.stringify({ query, mode }),
     });
     const report = await res.json();
+
+    if (!res.ok) {
+      pending.querySelector(".msg-bubble").textContent = report.detail || "Request failed.";
+      return;
+    }
 
     pending.innerHTML = template.content.cloneNode(true).firstElementChild.innerHTML;
     renderAssistantMessage(pending, report);
@@ -187,8 +299,9 @@ async function sendQuery(query) {
 composer.addEventListener("submit", (e) => {
   e.preventDefault();
   const q = input.value.trim();
-  if (!q) return;
+  if (!q || input.disabled) return;
   sendQuery(q);
 });
 
+setMode("demo");
 loadInfo();

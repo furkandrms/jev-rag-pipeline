@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>rag-guard · Nimbus support chat</title>
+  <title>rag-guard chat</title>
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
@@ -12,17 +12,37 @@
       <div class="brand">
         <span class="brand-mark">◆</span>
         <div>
-          <div class="brand-title">Nimbus support</div>
+          <div class="brand-title" id="brand-title">Nimbus support</div>
           <div class="brand-sub">guarded by rag-guard</div>
         </div>
       </div>
       <div class="backend-badges" id="backend-badges"></div>
     </header>
 
+    <div class="mode-bar">
+      <div class="mode-toggle" id="mode-toggle">
+        <button type="button" class="mode-btn active" data-mode="demo">Demo corpus</button>
+        <button type="button" class="mode-btn" data-mode="upload">My document</button>
+      </div>
+
+      <div class="upload-zone" id="upload-zone" hidden>
+        <label class="upload-drop" id="upload-drop" for="file-input">
+          <input type="file" id="file-input" accept=".txt,.md,.pdf" hidden />
+          <span class="upload-icon">⇧</span>
+          <span id="upload-label">Drop a .txt / .md / .pdf here, or click to choose a file</span>
+        </label>
+        <div class="upload-status" id="upload-status"></div>
+      </div>
+    </div>
+
     <main class="chat" id="chat">
-      <div class="intro">
+      <div class="intro" id="intro-demo">
         <p>Ask about Nimbus's ingest/query services, runbooks, incidents, or policies.</p>
         <p class="intro-hint">Every answer includes a reasoning trace -- click <strong>Why this answer?</strong> to see it.</p>
+      </div>
+      <div class="intro" id="intro-upload" hidden>
+        <p>Upload a document above, then ask questions about it.</p>
+        <p class="intro-hint">Only your browser can see what you upload -- it's stored in a session scoped to you, and a new upload replaces the previous one.</p>
       </div>
     </main>
 

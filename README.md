@@ -25,12 +25,17 @@ checks comes from rag-guard.
   full trace (what was kept/dropped, the sufficiency probability, the
   action, grounding coverage) and the final answer, as plain text.
 - `app.py` + `static/` -- a web chat UI serving the same pipeline over
-  FastAPI. Every assistant reply has a **"Why this answer?"** toggle that
-  expands into a visual reasoning trace: which retrieved chunks were kept
-  vs. dropped and at what probability, the sufficiency gate's probability
-  against its threshold, and a per-claim grounding breakdown (supported /
-  unsupported, with probability). The point is to make rag-guard's
-  decisions inspectable, not just its final answer.
+  FastAPI, with two modes: chat against the built-in Nimbus corpus, or
+  **upload your own document** (.txt/.md/.pdf) and chat against that
+  instead -- this is the actual point of the whole repo: proving rag-guard
+  + Jev work on a document neither has ever seen, chunked and embedded at
+  request time, not just a pre-built demo corpus. Every assistant reply has
+  a **"Why this answer?"** toggle that expands into a visual reasoning
+  trace: which retrieved chunks were kept vs. dropped and at what
+  probability, the sufficiency gate's probability against its threshold,
+  and a per-claim grounding breakdown (supported/unsupported, with
+  probability). The point is to make rag-guard's decisions inspectable,
+  not just its final answer.
 
 ## Setup
 
@@ -51,7 +56,6 @@ uvicorn app:app --reload   # web UI at http://127.0.0.1:8000
 no manual `export` step needed. If you exported these as real shell/CI
 environment variables instead, that still works too; `.env` never
 overrides a variable that's already set.
-```
 
 ## Example session
 
@@ -83,13 +87,44 @@ sufficiency gate doing its job instead of the LLM guessing.)
 ## Web UI
 
 `app.py` serves a single-page chat UI (no build step -- plain HTML/CSS/JS
-in `static/`) plus two JSON endpoints:
+in `static/`) plus three JSON endpoints:
 
 - `GET /api/info` -- which backends are active (`generate_fn`,
   `decision_model`) and the `RagGuard` thresholds currently in effect.
-- `POST /api/chat` -- `{"query": "..."}` in, the full `GuardReport` trace
-  out (per-chunk relevance, sufficiency, per-claim grounding, answer,
-  action).
+- `POST /api/upload` -- multipart file upload (`.txt`/`.md`/`.pdf`, 5 MB
+  max). The file is chunked (`pipeline_setup.chunk_text`: paragraph-packed
+  up to 800 chars, hard-split with overlap only for a single paragraph
+  longer than that) and embedded into a Chroma collection scoped to the
+  caller's `X-Session-Id` header. Uploading again replaces that session's
+  previous document rather than accumulating -- one document per session,
+  always the current one.
+- `POST /api/chat` -- `{"query": "...", "mode": "demo" | "upload"}` in
+  (plus `X-Session-Id` when `mode` is `"upload"`), the full `GuardReport`
+  trace out (per-chunk relevance, sufficiency, per-claim grounding,
+  answer, action).
+
+### Session isolation
+
+There's no login -- the frontend mints a random `X-Session-Id`
+(`crypto.randomUUID()`) on first load and persists it in `localStorage`.
+That id is the only thing scoping one visitor's uploaded document to them:
+a request with a different (or missing) session id can never retrieve
+another session's chunks, since each session gets its own Chroma
+collection (`session_<id>`), created fresh on upload and looked up by
+exact id on every query. Verified directly: uploading under one session
+id and then querying with a different one returns a clean "no document
+uploaded yet" error, not someone else's data.
+
+This holds regardless of how many server instances are running, *as a
+privacy guarantee* -- a session's data lives on whichever instance
+handled its upload, so a different instance simply has no collection for
+that id (same "no document uploaded yet" response) rather than ever
+returning another session's content. The tradeoff is availability, not
+correctness: running with more than one instance (or one that restarts)
+means an uploaded document can become temporarily unreachable if a later
+request lands elsewhere. For a demo/single-instance deployment (e.g. one
+Cloud Run instance, `min-instances=1 max-instances=1`) this doesn't come
+up at all.
 
 The frontend never hides a decision behind a plain "here's your answer" --
 every reply has a **Why this answer?** toggle. Opening it shows three
