@@ -5,3 +5,7 @@
 rag-guard[typesafe,openai] @ git+https://github.com/furkandrms/jev-rag-guard.git@967ea59
 
 chromadb>=0.5
+
+# web UI (app.py)
+fastapi>=0.110
+uvicorn[standard]>=0.29

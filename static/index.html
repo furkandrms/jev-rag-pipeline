@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>rag-guard · Nimbus support chat</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">◆</span>
+        <div>
+          <div class="brand-title">Nimbus support</div>
+          <div class="brand-sub">guarded by rag-guard</div>
+        </div>
+      </div>
+      <div class="backend-badges" id="backend-badges"></div>
+    </header>
+
+    <main class="chat" id="chat">
+      <div class="intro">
+        <p>Ask about Nimbus's ingest/query services, runbooks, incidents, or policies.</p>
+        <p class="intro-hint">Every answer includes a reasoning trace -- click <strong>Why this answer?</strong> to see it.</p>
+      </div>
+    </main>
+
+    <form class="composer" id="composer">
+      <input
+        type="text"
+        id="query-input"
+        placeholder="How do I restart the ingest service?"
+        autocomplete="off"
+      />
+      <button type="submit" id="send-btn">
+        <span class="send-label">Ask</span>
+      </button>
+    </form>
+  </div>
+
+  <template id="message-template">
+    <div class="msg msg-assistant">
+      <div class="msg-bubble">
+        <div class="action-badge"></div>
+        <div class="msg-text"></div>
+      </div>
+      <button class="trace-toggle" type="button">
+        <span class="chevron">›</span> Why this answer?
+      </button>
+      <div class="trace-panel"></div>
+    </div>
+  </template>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
