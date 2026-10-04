@@ -40,7 +40,7 @@ def _print_trace(report) -> None:
 
 
 def main() -> None:
-    guard, retrieve, generate_fn, _upload_generate_fn, backend_info = setup()
+    guard, retrieve, generate_fn, _upload_generate_fn, _rewrite_query_fn, backend_info = setup()
 
     print("rag-guard REPL against the Nimbus docs corpus")
     print(

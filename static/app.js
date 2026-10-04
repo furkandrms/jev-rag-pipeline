@@ -5,7 +5,6 @@ const composer = document.getElementById("composer");
 const input = document.getElementById("query-input");
 const sendBtn = document.getElementById("send-btn");
 const template = document.getElementById("message-template");
-const badgesEl = document.getElementById("backend-badges");
 const uploadDropEl = document.getElementById("upload-drop");
 const uploadLabelEl = document.getElementById("upload-label");
 const uploadStatusEl = document.getElementById("upload-status");
@@ -15,6 +14,7 @@ const docChangeBtnEl = document.getElementById("doc-change-btn");
 const chunksPanelEl = document.getElementById("chunks-panel");
 const metricsStripEl = document.getElementById("metrics-strip");
 const activityLogEl = document.getElementById("activity-log");
+const sideStepperEl = document.getElementById("side-stepper");
 
 let thresholds = {
   relevance_threshold: 0.5,
@@ -72,6 +72,20 @@ function pct(p) {
   return `${Math.round(p * 100)}%`;
 }
 
+/* --- Pipeline stage (sidebar) ------------------------------------------------ */
+// Mirrors the stepper shown inline in the active chat bubble, so the
+// current stage is also visible without scrolling back up to the message.
+
+function stepperHtml() {
+  return STAGES.map(
+    (s) => `<span class="stepper-item" data-stage="${s.key}"><span class="stepper-dot"></span>${s.label}</span>`
+  ).join("");
+}
+
+function renderSideStepperIdle() {
+  sideStepperEl.innerHTML = `<div class="stepper-empty">No active query.</div>`;
+}
+
 /* --- Activity log ----------------------------------------------------------- */
 // A live, timestamped record of what the system actually did -- every line
 // here corresponds to a real event the backend reported, not a simulated
@@ -97,12 +111,8 @@ async function loadInfo() {
     const res = await fetch("/api/info");
     const data = await res.json();
     if (data.thresholds) thresholds = data.thresholds;
-    badgesEl.innerHTML = `
-      <span class="backend-badge">generate: <b>${escapeHtml(data.generate_model || data.generate_fn)}</b></span>
-      <span class="backend-badge">decisions: <b>${escapeHtml(data.decision_model)}</b></span>
-    `;
   } catch (e) {
-    badgesEl.innerHTML = `<span class="backend-badge">backend info unavailable</span>`;
+    // Thresholds keep their defaults if /api/info is unreachable.
   }
 }
 
@@ -119,6 +129,7 @@ function showChatView(filename, chunkCount, chunks) {
   docChipEl.textContent = `📄 ${filename} · ${chunkCount} chunks`;
   renderChunksPanel(chunks || []);
   renderMetricsStrip();
+  renderSideStepperIdle();
   input.focus();
 }
 
@@ -163,7 +174,7 @@ async function uploadFile(file) {
     chatEl.innerHTML = `
       <div class="intro">
         <p>Ask something about the document you uploaded.</p>
-        <p class="intro-hint">Watch the pipeline run live -- retrieval, relevance, sufficiency, generation, and grounding, each with real timing and token counts.</p>
+        <p class="intro-hint">Watch the pipeline run live — retrieval, relevance, sufficiency, generation, and grounding, each with real timing and token counts.</p>
       </div>
     `;
     Object.assign(sessionMetrics, {
@@ -215,7 +226,7 @@ docChangeBtnEl.addEventListener("click", async () => {
   chatEl.innerHTML = `
     <div class="intro">
       <p>Ask something about the document you uploaded.</p>
-      <p class="intro-hint">Watch the activity log on the right -- it shows exactly what the system did at each stage, live.</p>
+      <p class="intro-hint">Watch the activity log on the right — it shows exactly what the system did at each stage, live.</p>
     </div>
   `;
   activityLogEl.innerHTML = "";
@@ -256,11 +267,11 @@ function renderMetricsStrip() {
     ? Math.round(sessionMetrics.latencies.reduce((a, b) => a + b, 0) / sessionMetrics.latencies.length)
     : 0;
   metricsStripEl.innerHTML = `
-    <div class="metric-item"><span class="metric-value">${sessionMetrics.queries}</span><span class="metric-label">Queries</span></div>
-    <div class="metric-item"><span class="metric-value">${sessionMetrics.decisionCalls}</span><span class="metric-label">Decision calls</span></div>
-    <div class="metric-item"><span class="metric-value">${sessionMetrics.inputTokens + sessionMetrics.outputTokens}</span><span class="metric-label">Tokens used</span></div>
-    <div class="metric-item"><span class="metric-value">${avgLatency}ms</span><span class="metric-label">Avg latency</span></div>
-    <div class="metric-item"><span class="metric-value">${sessionMetrics.cacheHits}</span><span class="metric-label">Cache hits</span></div>
+    <div class="metric-item" title="Questions asked this session"><span class="metric-value">${sessionMetrics.queries}</span><span class="metric-label">Queries</span></div>
+    <div class="metric-item" title="Relevance/sufficiency/grounding judgments made by the decision model"><span class="metric-value">${sessionMetrics.decisionCalls}</span><span class="metric-label">Decision calls</span></div>
+    <div class="metric-item" title="Input + output tokens used by the generation model only -- decision-model calls aren't counted"><span class="metric-value">${sessionMetrics.inputTokens + sessionMetrics.outputTokens}</span><span class="metric-label">Generation tokens</span></div>
+    <div class="metric-item" title="Average end-to-end time per query, including cache hits"><span class="metric-value">${avgLatency}ms</span><span class="metric-label">Avg latency</span></div>
+    <div class="metric-item" title="Queries answered from cache instead of re-running the pipeline"><span class="metric-value">${sessionMetrics.cacheHits}</span><span class="metric-label">Cache hits</span></div>
   `;
 }
 
@@ -280,10 +291,7 @@ function addAssistantMessage() {
   const div = document.createElement("div");
   div.className = "msg msg-assistant";
   div.innerHTML = template.content.cloneNode(true).firstElementChild.innerHTML;
-  const stepperEl = div.querySelector(".stepper");
-  stepperEl.innerHTML = STAGES.map(
-    (s) => `<span class="stepper-item" data-stage="${s.key}"><span class="stepper-dot"></span>${s.label}</span>`
-  ).join("");
+  div.querySelector(".stepper").innerHTML = stepperHtml();
   div.querySelector(".msg-bubble").innerHTML = `<span class="dots">thinking</span>`;
   chatEl.appendChild(div);
   chatEl.scrollTop = chatEl.scrollHeight;
@@ -300,11 +308,21 @@ function setStageState(container, key, state, ms) {
   }`;
 }
 
+// A chunk id is "<uploaded filename>-<index>" (see pipeline_setup.py), which
+// is often wider than the fixed-width label column -- showing the raw id
+// truncates mid-filename and leaves nothing recognizable. The index alone
+// ("Chunk 3") fits reliably; the full id is still available on hover.
+function chunkShortLabel(chunkId) {
+  const match = /-(\d+)$/.exec(chunkId);
+  return match ? `Chunk ${match[1]}` : chunkId;
+}
+
 function buildRelevanceStage(relevance) {
   if (!relevance.length) {
     return `<div class="stage-empty">No chunks retrieved.</div>`;
   }
-  return relevance
+  return [...relevance]
+    .sort((a, b) => b.probability - a.probability)
     .map((r) => {
       const kept = r.kept;
       const snippet = r.text.length > 90 ? r.text.slice(0, 90) + "…" : r.text;
@@ -312,16 +330,18 @@ function buildRelevanceStage(relevance) {
       // filename, which is attacker-controllable -- never trust it raw
       // in HTML, even though it's just an id string.
       const safeId = escapeHtml(r.chunk_id);
+      const shortLabel = escapeHtml(chunkShortLabel(r.chunk_id));
       return `
         <div>
           <div class="chunk-row">
-            <span class="chunk-id" title="${safeId}">${safeId}</span>
+            <span class="chunk-id" title="${safeId}">${shortLabel}</span>
             <div class="chunk-bar-track">
               <div class="chunk-bar-fill ${kept ? "kept" : "dropped"}" style="width:${pct(r.probability)}"></div>
             </div>
             <span class="chunk-prob">${r.probability.toFixed(2)}</span>
+            <span class="chunk-flag ${kept ? "kept" : "dropped"}">${kept ? "kept" : "dropped"}</span>
           </div>
-          <div class="chunk-snippet">${kept ? "✓ kept — " : "dropped — "}${escapeHtml(snippet)}</div>
+          <div class="chunk-snippet">${escapeHtml(snippet)}</div>
         </div>`;
     })
     .join("");
@@ -332,7 +352,7 @@ function buildSufficiencyStage(sufficiency) {
   return `
     <div class="suff-row">
       <div class="suff-bar-track">
-        <div class="suff-threshold" style="left:${pct(thresholds.sufficiency_threshold)}"></div>
+        <div class="suff-threshold" style="left:${pct(thresholds.sufficiency_threshold)}" title="Threshold: ${thresholds.sufficiency_threshold.toFixed(2)} — needs to score at least this high to generate an answer"></div>
         <div class="suff-bar-fill ${pass ? "pass" : "fail"}" style="width:${pct(sufficiency.probability)}"></div>
       </div>
       <span class="suff-label">${pass ? "sufficient" : "insufficient"} · ${sufficiency.probability.toFixed(2)}</span>
@@ -377,6 +397,11 @@ function renderTracePanel(container, report) {
   const groundPass = report.grounding ? report.grounding.grounded : null;
 
   tracePanel.innerHTML = `
+    ${
+      report.rewritten_query
+        ? `<div class="trace-rewrite">Resolved as: <b>${escapeHtml(report.rewritten_query)}</b> <span class="trace-rewrite-note">(used for retrieval, since the question as asked relies on the earlier conversation)</span></div>`
+        : ""
+    }
     <div class="trace-stage">
       <div class="trace-stage-title"><span class="stage-dot ${relevancePass ? "pass" : "fail"}"></span>Relevance</div>
       ${buildRelevanceStage(report.relevance)}
@@ -466,7 +491,15 @@ async function streamChat(query, onEvent) {
 async function sendQuery(query) {
   addUserMessage(query);
   const container = addAssistantMessage();
-  setStageState(container, "retrieval", "active");
+  sideStepperEl.innerHTML = stepperHtml();
+
+  // Mirrors every stepper update into the sidebar too, so the current
+  // stage is visible without scrolling back up to the message bubble.
+  const setStage = (key, state, ms) => {
+    setStageState(container, key, state, ms);
+    setStageState(sideStepperEl, key, state, ms);
+  };
+  setStage("retrieval", "active");
 
   input.value = "";
   sendBtn.disabled = true;
@@ -485,31 +518,41 @@ async function sendQuery(query) {
     await streamChat(query, (event, data) => {
       if (event === "error") {
         container.querySelector(".msg-bubble").textContent = data.detail;
+        sideStepperEl.innerHTML = `<div class="stepper-empty">Last query failed.</div>`;
         logLine("fail", escapeHtml(data.detail));
         return;
       }
+      if (event === "rewrite") {
+        logLine(
+          "info",
+          `follow-up resolved to: <b>${escapeHtml(data.rewritten_query)}</b>`
+        );
+        return;
+      }
       if (event === "cached") {
-        container.querySelector(".stepper").innerHTML = `<span class="cache-badge">⚡ served from cache</span>`;
+        const cacheHtml = `<span class="cache-badge">⚡ served from cache</span>`;
+        container.querySelector(".stepper").innerHTML = cacheHtml;
+        sideStepperEl.innerHTML = cacheHtml;
         clearBubble();
         finalizeMessage(container, data);
         recordMetrics(data, data.total_elapsed_ms, true);
-        logLine("cache", `cache hit -- served in ${data.total_elapsed_ms}ms, pipeline skipped`);
+        logLine("cache", `cache hit — served in ${data.total_elapsed_ms}ms, pipeline skipped`);
         return;
       }
       if (STAGES.some((s) => s.key === event)) {
-        setStageState(container, event, "done", data.elapsed_ms);
+        setStage(event, "done", data.elapsed_ms);
         logLine("ok", `<b>${event}</b> ${stageLogDetail(event, data)} (${data.elapsed_ms}ms)`);
 
         // Mark the next stage "active" (pulsing) so the stepper visibly
         // progresses even though SSE only tells us about completions.
         const idx = STAGES.findIndex((s) => s.key === event);
         const next = STAGES[idx + 1];
-        if (next) setStageState(container, next.key, "active");
+        if (next) setStage(next.key, "active");
 
         if (event === "sufficiency" && !data.sufficiency.sufficient) {
-          setStageState(container, "generation", "skipped");
-          setStageState(container, "grounding", "skipped");
-          logLine("warn", "generation + grounding skipped -- context judged insufficient");
+          setStage("generation", "skipped");
+          setStage("grounding", "skipped");
+          logLine("warn", "generation + grounding skipped — context judged insufficient");
         }
         return;
       }
@@ -519,7 +562,7 @@ async function sendQuery(query) {
         recordMetrics(data.report, data.total_elapsed_ms, false);
         logLine(
           data.report.action === "answered" ? "ok" : "warn",
-          `done -- <b>${escapeHtml(data.report.action)}</b> (${data.total_elapsed_ms}ms total)`
+          `done — <b>${escapeHtml(data.report.action)}</b> (${data.total_elapsed_ms}ms total)`
         );
       }
     });

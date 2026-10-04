@@ -274,6 +274,59 @@ def build_generate_fn(
     raise ValueError(f"unknown backend: {backend}")
 
 
+QUERY_REWRITE_SYSTEM_PROMPT = (
+    "Rewrite the follow-up question into a fully standalone question that "
+    "makes sense without the conversation it came from -- resolve pronouns "
+    "and implicit references (e.g. \"it\", \"that\", \"so\") using the "
+    "conversation below. Keep the original language and intent. If the "
+    "follow-up is already standalone, return it unchanged. Reply with only "
+    "the rewritten question and nothing else -- no preamble, no quotes."
+)
+
+
+def build_rewrite_fn(backend: str, client):
+    """Build a closure that turns a context-dependent follow-up ("What's
+    its purpose, then?") into a standalone question a similarity search can
+    actually retrieve against, using the last few turns of this session's
+    conversation. Retrieval embeds the query in isolation -- it has no way
+    to resolve a pronoun or an implicit back-reference to the previous
+    answer, so an unresolved follow-up routinely scores low on every chunk
+    and gets judged insufficient even when the document does cover it.
+
+    Returns the query unchanged (no LLM call) when there's no history yet,
+    since a first turn is standalone by definition.
+    """
+
+    def rewrite(query: str, history: list[dict]) -> str:
+        if not history:
+            return query
+        convo = "\n".join(f"Q: {h['query']}\nA: {h['answer']}" for h in history)
+        prompt = (
+            f"{QUERY_REWRITE_SYSTEM_PROMPT}\n\nConversation so far:\n{convo}\n\n"
+            f"Follow-up question: {query}\n\nStandalone question:"
+        )
+        if backend == "openai":
+            response = client.chat.completions.create(
+                model=GENERATE_MODEL_NAMES["openai"],
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=120,
+            )
+            rewritten = (response.choices[0].message.content or "").strip()
+        else:
+            response = client.messages.create(
+                model=GENERATE_MODEL_NAMES["anthropic"],
+                max_tokens=120,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            rewritten = "".join(
+                block.text for block in response.content if getattr(block, "type", None) == "text"
+            ).strip()
+        # Guard against a malformed/empty rewrite silently breaking retrieval.
+        return rewritten or query
+
+    return rewrite
+
+
 def make_decision_model_for_client(backend: str, client) -> DecisionModel:
     if backend == "openai":
         return OpenAIDecisionModel(client=client)
@@ -291,18 +344,24 @@ def make_decision_model(fallback: DecisionModel) -> tuple[str, DecisionModel]:
 def setup():
     """Build everything chat.py / app.py need.
 
-    Returns (guard, retrieve, generate_fn, make_upload_generate_fn, backend_info).
-    `generate_fn` answers using the Nimbus-support system prompt against the
-    demo corpus (chat.py only). `make_upload_generate_fn(usage_sink=None)` is
-    a factory, not a fixed function -- app.py calls it fresh per request with
-    a new `usage_sink` dict so it can read back that specific call's real
-    token usage afterward, without building a whole new client each time.
+    Returns (guard, retrieve, generate_fn, make_upload_generate_fn,
+    rewrite_query_fn, backend_info). `generate_fn` answers using the
+    Nimbus-support system prompt against the demo corpus (chat.py only).
+    `make_upload_generate_fn(usage_sink=None)` is a factory, not a fixed
+    function -- app.py calls it fresh per request with a new `usage_sink`
+    dict so it can read back that specific call's real token usage
+    afterward, without building a whole new client each time.
+    `rewrite_query_fn(query, history)` turns a context-dependent follow-up
+    into a standalone one for retrieval (app.py only -- chat.py's REPL has
+    no multi-turn history to rewrite against).
     """
     client_backend, client = make_client()
     generate_fn = build_generate_fn(client_backend, client, SYSTEM_PROMPT)
 
     def make_upload_generate_fn(usage_sink: dict | None = None) -> GenerateFn:
         return build_generate_fn(client_backend, client, UPLOAD_SYSTEM_PROMPT, usage_sink=usage_sink)
+
+    rewrite_query_fn = build_rewrite_fn(client_backend, client)
 
     fallback_model = make_decision_model_for_client(client_backend, client)
     decision_backend, model = make_decision_model(fallback_model)
@@ -313,10 +372,13 @@ def setup():
     # grounding check (strict defaults, untouched) to catch an answer that
     # overreaches, rather than relying on sufficiency to pre-empt every
     # borderline case before generation ever gets a chance to run.
-    guard = RagGuard(model=model, sufficiency_threshold=0.45)
+    # rerank_by_relevance: hand the generator the most relevant chunks
+    # first rather than raw retrieval order -- cheap and reduces the odds
+    # of a weak/off-topic chunk near the front nudging the answer astray.
+    guard = RagGuard(model=model, sufficiency_threshold=0.45, rerank_by_relevance=True)
     backend_info = {
         "generate_fn": client_backend,
         "generate_model": GENERATE_MODEL_NAMES[client_backend],
         "decision_model": decision_backend,
     }
-    return guard, retrieve, generate_fn, make_upload_generate_fn, backend_info
+    return guard, retrieve, generate_fn, make_upload_generate_fn, rewrite_query_fn, backend_info

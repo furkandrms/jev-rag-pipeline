@@ -57,8 +57,9 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
@@ -77,17 +78,46 @@ from pipeline_setup import (
 )
 from rag_guard import Chunk
 from rag_guard.grounding import check_grounding
-from rag_guard.relevance import filter_relevant_chunks
+from rag_guard.relevance import filter_relevant_chunks, rerank_kept_chunks
 from rag_guard.sufficiency import check_sufficiency
 
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024  # 5 MB -- generous for text/markdown/small PDFs
+
+# The frontend mints this itself (crypto.randomUUID()) but it's still a
+# client-supplied header -- used as a Chroma collection-name suffix and a
+# dict key, so it's validated at this one boundary rather than trusted
+# verbatim everywhere it's read.
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9-]{1,128}$")
+
+# Per-session sliding-window limit on pipeline runs -- /api/chat(/stream)
+# calls a real, billed LLM API on every request, so an unbounded client
+# (buggy or malicious) can otherwise run up real cost with no pushback.
+_RATE_LIMIT_MAX_CALLS = 20
+_RATE_LIMIT_WINDOW_SECONDS = 60.0
+_rate_limit_hits: dict[str, list[float]] = {}
+
+
+def _check_session_id(x_session_id: str) -> str:
+    if not _SESSION_ID_RE.match(x_session_id):
+        raise HTTPException(400, "Invalid X-Session-Id")
+    return x_session_id
+
+
+def _check_rate_limit(session_id: str) -> None:
+    now = time.monotonic()
+    hits = [t for t in _rate_limit_hits.get(session_id, []) if now - t < _RATE_LIMIT_WINDOW_SECONDS]
+    if len(hits) >= _RATE_LIMIT_MAX_CALLS:
+        raise HTTPException(429, "Too many requests -- please slow down")
+    hits.append(now)
+    _rate_limit_hits[session_id] = hits
+
 
 app = FastAPI(title="rag-guard document chat")
 
 # setup() also builds the Nimbus demo corpus and its generate_fn, since
 # chat.py (a separate entry point) needs them -- this app only uses the
 # pieces relevant to the upload flow (_guard, _make_upload_generate_fn).
-_guard, _, _, _make_upload_generate_fn, _backend_info = setup()
+_guard, _, _, _make_upload_generate_fn, _rewrite_query_fn, _backend_info = setup()
 
 # Per-session state, in-memory (mirrors the in-memory Chroma client it
 # describes -- both reset on process restart, see README's "known
@@ -97,8 +127,21 @@ _guard, _, _, _make_upload_generate_fn, _backend_info = setup()
 #     so re-asking the same question skips the pipeline entirely. Cleared
 #     for a session whenever that session uploads a new document, since a
 #     cached answer is only valid for the document it was computed against.
+#   _conversation_history: last few (query, answer) turns per session, used
+#     only to resolve a context-dependent follow-up ("What's its purpose,
+#     then?") into a standalone query before retrieval -- retrieval embeds
+#     the query alone and has no other way to know what "then" refers to.
+#     Cleared alongside the cache on a new/removed document, same reason.
 _session_meta: dict[str, dict] = {}
 _response_cache: dict[tuple[str, str], dict] = {}
+_conversation_history: dict[str, list[dict]] = {}
+MAX_HISTORY_TURNS = 3
+
+
+def _remember_turn(session_id: str, query: str, answer: str) -> None:
+    history = _conversation_history.setdefault(session_id, [])
+    history.append({"query": query, "answer": answer})
+    del history[:-MAX_HISTORY_TURNS]
 
 
 class ChatRequest(BaseModel):
@@ -112,6 +155,7 @@ def _elapsed_ms(start: float) -> float:
 def _clear_session_cache(session_id: str) -> None:
     for key in [k for k in _response_cache if k[0] == session_id]:
         del _response_cache[key]
+    _conversation_history.pop(session_id, None)
 
 
 def _serialize_relevance(relevance) -> list[dict]:
@@ -163,8 +207,14 @@ def _run_pipeline(query: str, session_id: str):
         yield "cached", {**cached, "total_elapsed_ms": elapsed}
         return
 
+    history = _conversation_history.get(session_id, [])
+    retrieval_query = _rewrite_query_fn(query, history)
+    if retrieval_query != query:
+        stage_log(session_id, "rewrite", f'"{query}" -> "{retrieval_query}"')
+        yield "rewrite", {"original_query": query, "rewritten_query": retrieval_query}
+
     t = time.monotonic()
-    chunks = make_retriever(collection)(query)
+    chunks = make_retriever(collection)(retrieval_query)
 
     # Broad "what is this document about?" queries often have little
     # lexical/semantic overlap with the document's own title or opening
@@ -192,9 +242,45 @@ def _run_pipeline(query: str, session_id: str):
 
     t = time.monotonic()
     relevance = filter_relevant_chunks(
-        query, chunks, _guard.model, threshold=_guard.relevance_threshold
+        retrieval_query, chunks, _guard.model, threshold=_guard.relevance_threshold
     )
-    kept_chunks = [r.chunk for r in relevance if r.kept]
+
+    if anchor_added:
+        # The anchor was force-added to the retrieval pool specifically so
+        # broad "what is this document" questions have the opening chunk
+        # available -- but the relevance filter judges it by the same
+        # lexical/semantic bar as any other chunk, and a title/cover page
+        # routinely scores low against a query that doesn't happen to share
+        # its wording (e.g. "what's its purpose?" vs. an announcement title
+        # with no literal "purpose"). Scoring the anchor is still useful
+        # signal for the trace view, but dropping it here defeats the
+        # entire point of anchoring it: it never reaches
+        # sufficiency/generation at all.
+        anchor_id = f"{meta['filename']}-0"
+        anchor_result = next((r for r in relevance if r.chunk.id == anchor_id), None)
+        if anchor_result is not None and not anchor_result.kept:
+            stage_log(
+                session_id,
+                "relevance",
+                f"  [FORCE-KEEP] anchor chunk scored p={anchor_result.probability:.2f} "
+                f"(below threshold) but is kept anyway -- it's the doc's opening chunk",
+            )
+        relevance = [
+            replace(r, kept=True) if r.chunk.id == anchor_id and not r.kept else r
+            for r in relevance
+        ]
+
+    if _guard.rerank_by_relevance:
+        kept_chunks = rerank_kept_chunks(relevance)
+        if anchor_added:
+            # Reranking by probability alone would bury the anchor -- it's
+            # force-kept precisely because its own score is unreliable for
+            # broad queries, so pin it first rather than let a low score
+            # sort it to the back.
+            anchor_id = f"{meta['filename']}-0"
+            kept_chunks.sort(key=lambda c: c.id != anchor_id)
+    else:
+        kept_chunks = [r.chunk for r in relevance if r.kept]
     elapsed = _elapsed_ms(t)
     stage_log(
         session_id,
@@ -214,7 +300,7 @@ def _run_pipeline(query: str, session_id: str):
 
     t = time.monotonic()
     sufficiency = check_sufficiency(
-        query, kept_chunks, _guard.model, threshold=_guard.sufficiency_threshold
+        retrieval_query, kept_chunks, _guard.model, threshold=_guard.sufficiency_threshold
     )
     elapsed = _elapsed_ms(t)
     stage_log(
@@ -236,6 +322,7 @@ def _run_pipeline(query: str, session_id: str):
         )
         report = {
             "query": query,
+            "rewritten_query": retrieval_query if retrieval_query != query else None,
             "action": "insufficient_context",
             "answer": _guard.insufficient_context_message,
             "relevance": _serialize_relevance(relevance),
@@ -244,13 +331,14 @@ def _run_pipeline(query: str, session_id: str):
             "metrics": {"decision_calls": len(relevance) + 1, "generation_usage": None},
         }
         _response_cache[cache_key] = report
+        _remember_turn(session_id, query, report["answer"])
         yield "done", {"report": report, "total_elapsed_ms": total}
         return
 
     usage_sink: dict = {}
     t = time.monotonic()
     generate_fn = _make_upload_generate_fn(usage_sink=usage_sink)
-    answer = generate_fn(query, kept_chunks)
+    answer = generate_fn(retrieval_query, kept_chunks)
     elapsed = _elapsed_ms(t)
     model_name = _backend_info.get("generate_model", _backend_info["generate_fn"])
     tokens_in = usage_sink.get("input_tokens", "?")
@@ -310,6 +398,7 @@ def _run_pipeline(query: str, session_id: str):
     )
     report = {
         "query": query,
+        "rewritten_query": retrieval_query if retrieval_query != query else None,
         "action": action,
         "answer": answer,
         "relevance": _serialize_relevance(relevance),
@@ -318,6 +407,7 @@ def _run_pipeline(query: str, session_id: str):
         "metrics": {"decision_calls": decision_calls, "generation_usage": usage_sink or None},
     }
     _response_cache[cache_key] = report
+    _remember_turn(session_id, query, answer)
     yield "done", {"report": report, "total_elapsed_ms": total}
 
 
@@ -336,6 +426,7 @@ def info() -> dict:
 
 @app.get("/api/document-status")
 def document_status(x_session_id: str = Header(..., alias="X-Session-Id")) -> dict:
+    x_session_id = _check_session_id(x_session_id)
     meta = _session_meta.get(x_session_id)
     if meta is None or get_session_collection(x_session_id) is None:
         return {"uploaded": False}
@@ -347,7 +438,11 @@ async def upload(
     file: UploadFile = File(...),
     x_session_id: str = Header(..., alias="X-Session-Id"),
 ) -> dict:
-    content = await file.read()
+    x_session_id = _check_session_id(x_session_id)
+    # Bounded read: a file beyond the limit is rejected after one extra byte,
+    # not after buffering the whole upload -- an unbounded `file.read()` here
+    # would let an oversized upload exhaust memory before the size check runs.
+    content = await file.read(MAX_UPLOAD_BYTES + 1)
     if len(content) > MAX_UPLOAD_BYTES:
         raise HTTPException(413, f"File exceeds {MAX_UPLOAD_BYTES // (1024 * 1024)} MB limit")
 
@@ -371,6 +466,7 @@ async def upload(
 
 @app.delete("/api/document")
 def delete_document(x_session_id: str = Header(..., alias="X-Session-Id")) -> dict:
+    x_session_id = _check_session_id(x_session_id)
     remove_session_document(x_session_id)
     _clear_session_cache(x_session_id)
     _session_meta.pop(x_session_id, None)
@@ -380,6 +476,8 @@ def delete_document(x_session_id: str = Header(..., alias="X-Session-Id")) -> di
 
 @app.post("/api/chat")
 def chat(request: ChatRequest, x_session_id: str = Header(..., alias="X-Session-Id")) -> dict:
+    x_session_id = _check_session_id(x_session_id)
+    _check_rate_limit(x_session_id)
     query = request.query.strip()
     if not query:
         return {"error": "empty query"}
@@ -395,6 +493,8 @@ def chat(request: ChatRequest, x_session_id: str = Header(..., alias="X-Session-
 
 @app.post("/api/chat/stream")
 def chat_stream(request: ChatRequest, x_session_id: str = Header(..., alias="X-Session-Id")):
+    x_session_id = _check_session_id(x_session_id)
+    _check_rate_limit(x_session_id)
     query = request.query.strip()
 
     def sse():

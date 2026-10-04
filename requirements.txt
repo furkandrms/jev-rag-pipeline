@@ -2,7 +2,7 @@
 # the whole point of this repo is to exercise the real `pip install` path.
 # Pin to the exact commit used when this repo was last verified working;
 # bump it deliberately when re-testing against a newer rag-guard.
-rag-guard[typesafe,openai] @ git+https://github.com/furkandrms/jev-rag-guard.git@967ea59
+rag-guard[typesafe,openai] @ git+https://github.com/furkandrms/jev-rag-guard.git@cd2c864
 
 chromadb>=0.5
 python-dotenv>=1.0
