@@ -81,8 +81,10 @@ from rag_guard.caveat import check_caveat
 from rag_guard.clarify import check_ambiguity
 from rag_guard.grounding import check_grounding
 from rag_guard.intent import check_intent
+from rag_guard.pipeline import PARTIAL_CONTEXT_INSTRUCTION
 from rag_guard.relevance import filter_relevant_chunks, rerank_kept_chunks
 from rag_guard.sufficiency import check_sufficiency
+from rag_guard.types import CaveatResult
 
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024  # 5 MB -- generous for text/markdown/small PDFs
 
@@ -384,19 +386,24 @@ def _run_pipeline(query: str, session_id: str):
 
     t = time.monotonic()
     sufficiency = check_sufficiency(
-        retrieval_query, kept_chunks, _guard.model, threshold=_guard.sufficiency_threshold
+        retrieval_query,
+        kept_chunks,
+        _guard.model,
+        threshold=_guard.sufficiency_threshold,
+        partial_threshold=_guard.partial_sufficiency_threshold,
     )
     elapsed = _elapsed_ms(t)
+    suff_label = "sufficient" if sufficiency.sufficient else "PARTIAL" if sufficiency.partial else "INSUFFICIENT"
     stage_log(
         session_id,
         "sufficiency",
         f"p={sufficiency.probability:.2f} (threshold={_guard.sufficiency_threshold}) -> "
-        f"{'sufficient' if sufficiency.sufficient else 'INSUFFICIENT'} ({elapsed}ms)",
+        f"{suff_label} ({elapsed}ms)",
         level=logging.INFO if sufficiency.sufficient else logging.WARNING,
     )
     yield "sufficiency", {"sufficiency": asdict(sufficiency), "elapsed_ms": elapsed}
 
-    if not sufficiency.sufficient:
+    if not sufficiency.sufficient and not sufficiency.partial:
         total = _elapsed_ms(t_total)
         stage_log(
             session_id,
@@ -419,10 +426,24 @@ def _run_pipeline(query: str, session_id: str):
         yield "done", {"report": report, "total_elapsed_ms": total}
         return
 
+    # A synthetic caveat for the partial branch -- we already know *why* this
+    # answer needs flagging (sufficiency said so), no need to spend another
+    # decision call re-discovering it the way the real caveat check does for
+    # an answer that looked fully sufficient going in. Mirrors
+    # RagGuard.run()'s own partial-sufficiency handling (rag_guard/pipeline.py).
+    partial_caveat = (
+        CaveatResult(has_caveat=True, probability=1.0, reason=sufficiency.reason)
+        if sufficiency.partial
+        else None
+    )
+    generate_query = (
+        f"{PARTIAL_CONTEXT_INSTRUCTION}{retrieval_query}" if sufficiency.partial else retrieval_query
+    )
+
     usage_sink: dict = {}
     t = time.monotonic()
     generate_fn = _make_upload_generate_fn(usage_sink=usage_sink)
-    answer = generate_fn(retrieval_query, kept_chunks)
+    answer = generate_fn(generate_query, kept_chunks)
     elapsed = _elapsed_ms(t)
     model_name = _backend_info.get("generate_model", _backend_info["generate_fn"])
     tokens_in = usage_sink.get("input_tokens", "?")
@@ -472,8 +493,15 @@ def _run_pipeline(query: str, session_id: str):
     else:
         action = "answered"
 
-    caveat = None
-    if action == "answered" and _guard.check_caveat_enabled:
+    caveat = partial_caveat
+    if sufficiency.partial:
+        # Already known to need a caveat -- skip the real check (see
+        # partial_caveat above) and just surface it, same as RagGuard.run().
+        if action == "answered":
+            action = "answered_with_caveat"
+        stage_log(session_id, "caveat", f"PARTIAL sufficiency -> {action} (no decision call)")
+        yield "caveat", {"caveat": asdict(caveat), "elapsed_ms": 0.0}
+    elif action == "answered" and _guard.check_caveat_enabled:
         t = time.monotonic()
         caveat = check_caveat(answer, kept_chunks, _guard.model, threshold=_guard.caveat_threshold)
         decision_calls += 1

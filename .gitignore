@@ -8,3 +8,7 @@ venv/
 !.env.example
 
 .DS_Store
+
+# Real test/eval documents (used locally by eval_rag_guard.py) -- never
+# committed, since they're real-world files, not fixtures meant to ship.
+*.pdf

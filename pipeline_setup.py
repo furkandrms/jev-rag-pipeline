@@ -126,6 +126,24 @@ def remove_session_document(session_id: str) -> None:
         pass  # nothing to delete
 
 
+def _word_boundary_end(text: str, start: int, chunk_size: int) -> int:
+    """Pick a hard-split end index that falls on whitespace, not mid-word.
+
+    Searches backward from `start + chunk_size` for the nearest whitespace,
+    within the last 20% of the window so a single abnormally long "word"
+    (a URL, a table with no spaces) can't shrink the chunk to near-nothing.
+    Falls back to the raw offset if no whitespace is found in that range.
+    """
+    ideal_end = start + chunk_size
+    if ideal_end >= len(text):
+        return len(text)
+    search_floor = max(start + 1, ideal_end - chunk_size // 5)
+    boundary = text.rfind(" ", search_floor, ideal_end)
+    if boundary == -1:
+        boundary = text.rfind("\n", search_floor, ideal_end)
+    return boundary if boundary != -1 else ideal_end
+
+
 def chunk_text(text: str, chunk_size: int = 800, overlap: int = 100) -> list[str]:
     """Paragraph-aware chunking: pack whole paragraphs up to chunk_size,
     and only hard-split a paragraph that's longer than chunk_size on its own
@@ -148,9 +166,19 @@ def chunk_text(text: str, chunk_size: int = 800, overlap: int = 100) -> list[str
             flush()
             start = 0
             while start < len(para):
-                end = start + chunk_size
+                end = _word_boundary_end(para, start, chunk_size)
                 chunks.append(para[start:end])
-                start = end - overlap
+                if end >= len(para):
+                    break
+                # `end - overlap` is a raw offset too -- just as likely to
+                # land mid-word as the old hard `end` cut was (e.g. restart
+                # inside "word100" as "d100"), since overlap is a fixed
+                # character count with no idea where a word starts. Snap
+                # forward to the next space so the *next* chunk also only
+                # ever starts on a word boundary.
+                next_start = end - overlap
+                space = para.find(" ", next_start, end)
+                start = space + 1 if space != -1 else next_start
             continue
         candidate = f"{current}\n\n{para}" if current else para
         if len(candidate) <= chunk_size:
@@ -427,7 +455,20 @@ def setup():
     # rerank_by_relevance: hand the generator the most relevant chunks
     # first rather than raw retrieval order -- cheap and reduces the odds
     # of a weak/off-topic chunk near the front nudging the answer astray.
-    guard = RagGuard(model=model, sufficiency_threshold=0.45, rerank_by_relevance=True)
+    # partial_sufficiency_threshold: a mixed question (part answerable, part
+    # not) was previously judged fully "insufficient" and silently refused
+    # end to end -- this lets generation attempt the answerable part and
+    # say what it can't cover, instead of going silent on the whole thing.
+    # 0.5 here is a normal yes/no cutoff on its own dedicated question
+    # (rag_guard.sufficiency.PARTIAL_QUESTION) -- not a low number tuned
+    # against the main sufficiency probability, which doesn't carry this
+    # signal at all (see that module's comment on why).
+    guard = RagGuard(
+        model=model,
+        sufficiency_threshold=0.45,
+        partial_sufficiency_threshold=0.5,
+        rerank_by_relevance=True,
+    )
     backend_info = {
         "generate_fn": client_backend,
         "generate_model": GENERATE_MODEL_NAMES[client_backend],

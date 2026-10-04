@@ -5,6 +5,7 @@ const composer = document.getElementById("composer");
 const input = document.getElementById("query-input");
 const sendBtn = document.getElementById("send-btn");
 const template = document.getElementById("message-template");
+const badgesEl = document.getElementById("backend-badges");
 const uploadDropEl = document.getElementById("upload-drop");
 const uploadLabelEl = document.getElementById("upload-label");
 const uploadStatusEl = document.getElementById("upload-status");
@@ -121,8 +122,12 @@ async function loadInfo() {
     const res = await fetch("/api/info");
     const data = await res.json();
     if (data.thresholds) thresholds = data.thresholds;
+    badgesEl.innerHTML = `
+      <span class="backend-badge">generate: <b>${escapeHtml(data.generate_model || data.generate_fn)}</b></span>
+      <span class="backend-badge">decisions: <b>${escapeHtml(data.decision_model)}</b></span>
+    `;
   } catch (e) {
-    // Thresholds keep their defaults if /api/info is unreachable.
+    badgesEl.innerHTML = `<span class="backend-badge">backend info unavailable</span>`;
   }
 }
 
@@ -358,16 +363,26 @@ function buildRelevanceStage(relevance) {
 }
 
 function buildSufficiencyStage(sufficiency) {
+  if (!sufficiency) {
+    return `<div class="stage-empty">Skipped (pipeline stopped at an earlier stage).</div>`;
+  }
   const pass = sufficiency.sufficient;
+  const label = pass ? "sufficient" : sufficiency.partial ? "partial" : "insufficient";
+  const barClass = pass ? "pass" : sufficiency.partial ? "partial" : "fail";
   return `
     <div class="suff-row">
       <div class="suff-bar-track">
         <div class="suff-threshold" style="left:${pct(thresholds.sufficiency_threshold)}" title="Threshold: ${thresholds.sufficiency_threshold.toFixed(2)} — needs to score at least this high to generate an answer"></div>
-        <div class="suff-bar-fill ${pass ? "pass" : "fail"}" style="width:${pct(sufficiency.probability)}"></div>
+        <div class="suff-bar-fill ${barClass}" style="width:${pct(sufficiency.probability)}"></div>
       </div>
-      <span class="suff-label">${pass ? "sufficient" : "insufficient"} · ${sufficiency.probability.toFixed(2)}</span>
+      <span class="suff-label">${label} · ${sufficiency.probability.toFixed(2)}</span>
     </div>
-    ${sufficiency.reason ? `<div class="chunk-snippet" style="margin-left:0;margin-top:6px;">${escapeHtml(sufficiency.reason)}</div>` : ""}
+    ${
+      sufficiency.partial
+        ? `<div class="chunk-snippet" style="margin-left:0;margin-top:6px;">Context only partially covers the question — generation was allowed to answer what it can and flag the rest, instead of refusing outright.</div>`
+        : ""
+    }
+    ${sufficiency.reason && !sufficiency.partial ? `<div class="chunk-snippet" style="margin-left:0;margin-top:6px;">${escapeHtml(sufficiency.reason)}</div>` : ""}
   `;
 }
 
@@ -400,11 +415,44 @@ function buildGroundingStage(grounding) {
   `;
 }
 
+function buildIntentStage(intent) {
+  if (!intent) {
+    return `<div class="stage-empty">Not evaluated for this response.</div>`;
+  }
+  return `
+    <div class="chunk-snippet" style="margin-left:0;">action: ${escapeHtml(intent.action)} · p=${intent.probability.toFixed(2)}</div>
+    ${intent.reason ? `<div class="chunk-snippet" style="margin-left:0;margin-top:6px;">${escapeHtml(intent.reason)}</div>` : ""}
+  `;
+}
+
+function buildClarifyStage(clarify) {
+  if (!clarify) {
+    return `<div class="stage-empty">Not evaluated for this response.</div>`;
+  }
+  return `
+    <div class="chunk-snippet" style="margin-left:0;">needs clarification: ${clarify.needs_clarification ? "yes" : "no"} · p=${clarify.probability.toFixed(2)}</div>
+    ${clarify.reason ? `<div class="chunk-snippet" style="margin-left:0;margin-top:6px;">${escapeHtml(clarify.reason)}</div>` : ""}
+  `;
+}
+
+function buildCaveatStage(caveat) {
+  if (!caveat) {
+    return `<div class="stage-empty">Not evaluated for this response.</div>`;
+  }
+  return `
+    <div class="chunk-snippet" style="margin-left:0;">has caveat: ${caveat.has_caveat ? "yes" : "no"} · p=${caveat.probability.toFixed(2)}</div>
+    ${caveat.reason ? `<div class="chunk-snippet" style="margin-left:0;margin-top:6px;">${escapeHtml(caveat.reason)}</div>` : ""}
+  `;
+}
+
 function renderTracePanel(container, report) {
   const tracePanel = container.querySelector(".trace-panel");
   const relevancePass = report.relevance.some((r) => r.kept);
-  const suffPass = report.sufficiency.sufficient;
+  const suffPass = report.sufficiency ? report.sufficiency.sufficient : null;
   const groundPass = report.grounding ? report.grounding.grounded : null;
+  const intentPass = report.intent ? report.intent.action === "proceed" : null;
+  const clarifyPass = report.clarify ? !report.clarify.needs_clarification : null;
+  const caveatPass = report.caveat ? !report.caveat.has_caveat : null;
 
   tracePanel.innerHTML = `
     ${
@@ -413,11 +461,19 @@ function renderTracePanel(container, report) {
         : ""
     }
     <div class="trace-stage">
+      <div class="trace-stage-title"><span class="stage-dot ${intentPass === null ? "" : intentPass ? "pass" : "fail"}"></span>Intent</div>
+      ${buildIntentStage(report.intent)}
+    </div>
+    <div class="trace-stage">
       <div class="trace-stage-title"><span class="stage-dot ${relevancePass ? "pass" : "fail"}"></span>Relevance</div>
       ${buildRelevanceStage(report.relevance)}
     </div>
     <div class="trace-stage">
-      <div class="trace-stage-title"><span class="stage-dot ${suffPass ? "pass" : "fail"}"></span>Sufficiency</div>
+      <div class="trace-stage-title"><span class="stage-dot ${clarifyPass === null ? "" : clarifyPass ? "pass" : "fail"}"></span>Clarify</div>
+      ${buildClarifyStage(report.clarify)}
+    </div>
+    <div class="trace-stage">
+      <div class="trace-stage-title"><span class="stage-dot ${suffPass === null ? "" : suffPass ? "pass" : "fail"}"></span>Sufficiency</div>
       ${buildSufficiencyStage(report.sufficiency)}
     </div>
     ${
@@ -431,6 +487,10 @@ function renderTracePanel(container, report) {
     <div class="trace-stage">
       <div class="trace-stage-title"><span class="stage-dot ${groundPass === null ? "" : groundPass ? "pass" : "fail"}"></span>Grounding</div>
       ${buildGroundingStage(report.grounding)}
+    </div>
+    <div class="trace-stage">
+      <div class="trace-stage-title"><span class="stage-dot ${caveatPass === null ? "" : caveatPass ? "pass" : "fail"}"></span>Caveat</div>
+      ${buildCaveatStage(report.caveat)}
     </div>
   `;
 
