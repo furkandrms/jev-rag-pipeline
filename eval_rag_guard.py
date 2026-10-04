@@ -78,7 +78,11 @@ DOCS = [
         filename="vw_bakim_kapsamlari_2025.pdf",
         collection_name="eval_vw_doc",
         cases=[
-            Case("How often is the brake pad inspection performed?", "answered", "in-scope"),
+            # The doc gives different brake-pad-inspection intervals depending
+            # on powertrain (electric vs. internal combustion) -- with the new
+            # clarify stage, this is correctly flagged as needing the user to
+            # specify which vehicle type they mean, rather than guessing.
+            Case("How often is the brake pad inspection performed?", "clarify", "in-scope"),
             Case("Is the windshield washer fluid level check part of the maintenance scope?", "answered", "in-scope"),
             Case(
                 "According to this document, what are the threshold values of the JEV 2.3 decision mechanism?",
@@ -130,7 +134,7 @@ def report_line(report: GuardReport, case: Case) -> tuple[bool, str]:
 
 def main() -> int:
     print("Setting up pipeline (real retrieval + generation + decision model)...")
-    guard, _, _, make_upload_generate_fn, _, backend_info = setup()
+    guard, _, _, make_upload_generate_fn, _, backend_info, _ = setup()
     generate_fn = make_upload_generate_fn()
     print(f"  backend: {backend_info}\n")
 

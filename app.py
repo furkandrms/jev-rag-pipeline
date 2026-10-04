@@ -77,7 +77,10 @@ from pipeline_setup import (
     setup,
 )
 from rag_guard import Chunk
+from rag_guard.caveat import check_caveat
+from rag_guard.clarify import check_ambiguity
 from rag_guard.grounding import check_grounding
+from rag_guard.intent import check_intent
 from rag_guard.relevance import filter_relevant_chunks, rerank_kept_chunks
 from rag_guard.sufficiency import check_sufficiency
 
@@ -117,7 +120,7 @@ app = FastAPI(title="rag-guard document chat")
 # setup() also builds the Nimbus demo corpus and its generate_fn, since
 # chat.py (a separate entry point) needs them -- this app only uses the
 # pieces relevant to the upload flow (_guard, _make_upload_generate_fn).
-_guard, _, _, _make_upload_generate_fn, _rewrite_query_fn, _backend_info = setup()
+_guard, _, _, _make_upload_generate_fn, _rewrite_query_fn, _backend_info, _clarify_fn = setup()
 
 # Per-session state, in-memory (mirrors the in-memory Chroma client it
 # describes -- both reset on process restart, see README's "known
@@ -192,6 +195,44 @@ def _run_pipeline(query: str, session_id: str):
     """
     t_total = time.monotonic()
     stage_log(session_id, "query", f'"{query}"')
+
+    if _guard.check_intent_enabled:
+        t = time.monotonic()
+        intent = check_intent(query, _guard.model, threshold=_guard.intent_threshold)
+        elapsed = _elapsed_ms(t)
+        stage_log(
+            session_id,
+            "intent",
+            f"action={intent.action} p={intent.probability:.2f} "
+            f"(threshold={_guard.intent_threshold}) ({elapsed}ms)",
+            level=logging.INFO if intent.action == "proceed" else logging.WARNING,
+        )
+        yield "intent", {"intent": asdict(intent), "elapsed_ms": elapsed}
+        if intent.action != "proceed":
+            message = (
+                _guard.escalate_message if intent.action == "escalate" else _guard.refuse_message
+            )
+            total = _elapsed_ms(t_total)
+            stage_log(
+                session_id,
+                "done",
+                f"action={intent.action}, retrieval skipped, total={total}ms",
+                level=logging.WARNING,
+            )
+            report = {
+                "query": query,
+                "rewritten_query": None,
+                "action": intent.action,
+                "answer": message,
+                "relevance": [],
+                "sufficiency": None,
+                "grounding": None,
+                "intent": asdict(intent),
+                "metrics": {"decision_calls": 1, "generation_usage": None},
+            }
+            _remember_turn(session_id, query, message)
+            yield "done", {"report": report, "total_elapsed_ms": total}
+            return
 
     collection = get_session_collection(session_id)
     if collection is None:
@@ -298,6 +339,49 @@ def _run_pipeline(query: str, session_id: str):
         )
     yield "relevance", {"relevance": _serialize_relevance(relevance), "elapsed_ms": elapsed}
 
+    if _guard.check_ambiguity_enabled:
+        t = time.monotonic()
+        clarify = check_ambiguity(
+            retrieval_query, kept_chunks, _guard.model, threshold=_guard.ambiguity_threshold
+        )
+        elapsed = _elapsed_ms(t)
+        stage_log(
+            session_id,
+            "clarify",
+            f"p={clarify.probability:.2f} (threshold={_guard.ambiguity_threshold}) -> "
+            f"{'NEEDS CLARIFICATION' if clarify.needs_clarification else 'clear'} ({elapsed}ms)",
+            level=logging.WARNING if clarify.needs_clarification else logging.INFO,
+        )
+        yield "clarify", {"clarify": asdict(clarify), "elapsed_ms": elapsed}
+
+        if clarify.needs_clarification:
+            t = time.monotonic()
+            question = _clarify_fn(retrieval_query, kept_chunks)
+            elapsed = _elapsed_ms(t)
+            stage_log(session_id, "clarify", f"asking: {question!r} ({elapsed}ms)")
+            total = _elapsed_ms(t_total)
+            stage_log(
+                session_id,
+                "done",
+                f"action=clarify, generation skipped, total={total}ms",
+                level=logging.WARNING,
+            )
+            report = {
+                "query": query,
+                "rewritten_query": retrieval_query if retrieval_query != query else None,
+                "action": "clarify",
+                "answer": question,
+                "relevance": _serialize_relevance(relevance),
+                "sufficiency": None,
+                "grounding": None,
+                "clarify": asdict(clarify),
+                "metrics": {"decision_calls": len(relevance) + 2, "generation_usage": None},
+            }
+            _response_cache[cache_key] = report
+            _remember_turn(session_id, query, question)
+            yield "done", {"report": report, "total_elapsed_ms": total}
+            return
+
     t = time.monotonic()
     sufficiency = check_sufficiency(
         retrieval_query, kept_chunks, _guard.model, threshold=_guard.sufficiency_threshold
@@ -388,13 +472,30 @@ def _run_pipeline(query: str, session_id: str):
     else:
         action = "answered"
 
+    caveat = None
+    if action == "answered" and _guard.check_caveat_enabled:
+        t = time.monotonic()
+        caveat = check_caveat(answer, kept_chunks, _guard.model, threshold=_guard.caveat_threshold)
+        decision_calls += 1
+        elapsed = _elapsed_ms(t)
+        stage_log(
+            session_id,
+            "caveat",
+            f"p={caveat.probability:.2f} (threshold={_guard.caveat_threshold}) -> "
+            f"{'HAS CAVEAT' if caveat.has_caveat else 'clear'} ({elapsed}ms)",
+            level=logging.WARNING if caveat.has_caveat else logging.INFO,
+        )
+        yield "caveat", {"caveat": asdict(caveat), "elapsed_ms": elapsed}
+        if caveat.has_caveat:
+            action = "answered_with_caveat"
+
     total = _elapsed_ms(t_total)
     stage_log(
         session_id,
         "done",
         f"action={action}, decision_calls={decision_calls}, "
         f"tokens={tokens_in}in/{tokens_out}out, total={total}ms",
-        level=logging.INFO if action == "answered" else logging.WARNING,
+        level=logging.INFO if action in ("answered", "answered_with_caveat") else logging.WARNING,
     )
     report = {
         "query": query,
@@ -404,6 +505,7 @@ def _run_pipeline(query: str, session_id: str):
         "relevance": _serialize_relevance(relevance),
         "sufficiency": asdict(sufficiency),
         "grounding": _serialize_grounding(grounding),
+        "caveat": asdict(caveat) if caveat is not None else None,
         "metrics": {"decision_calls": decision_calls, "generation_usage": usage_sink or None},
     }
     _response_cache[cache_key] = report
@@ -420,6 +522,9 @@ def info() -> dict:
             "sufficiency_threshold": _guard.sufficiency_threshold,
             "grounding_threshold": _guard.grounding_threshold,
             "grounding_min_coverage": _guard.grounding_min_coverage,
+            "intent_threshold": _guard.intent_threshold,
+            "ambiguity_threshold": _guard.ambiguity_threshold,
+            "caveat_threshold": _guard.caveat_threshold,
         },
     }
 

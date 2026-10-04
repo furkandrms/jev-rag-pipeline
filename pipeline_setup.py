@@ -33,7 +33,12 @@ COLLECTION_NAME = "nimbus_docs"
 # short, focused corpora (the Nimbus demo docs) and was too thin a slice for
 # longer uploaded documents (e.g. a 37-chunk paper), where 4/37 chunks often
 # didn't include enough of the document for sufficiency to fairly judge it.
-TOP_K = 8
+# 8 still missed cases where a table gets hard-split across chunks (e.g. a
+# price row lands in one chunk but the column header -- the only thing that
+# disambiguates "this number is the monthly fee" -- ranks just outside top-8
+# in a different chunk); 12 gives disambiguating neighbor chunks like that a
+# real chance to be retrieved too.
+TOP_K = 12
 UPLOAD_COLLECTION_PREFIX = "session_"
 
 SYSTEM_PROMPT = (
@@ -283,6 +288,16 @@ QUERY_REWRITE_SYSTEM_PROMPT = (
     "the rewritten question and nothing else -- no preamble, no quotes."
 )
 
+CLARIFY_SYSTEM_PROMPT = (
+    "The retrieved context below gives different, conflicting answers to "
+    "the user's question depending on details they haven't provided (such "
+    "as product/vehicle variant, plan tier, or mileage). Write ONE short "
+    "question back to the user that asks for exactly the missing detail "
+    "needed to pick the right branch of the context. Reply with only that "
+    "question and nothing else -- no preamble, no explanation. Match the "
+    "language of the user's original question."
+)
+
 
 def build_rewrite_fn(backend: str, client):
     """Build a closure that turns a context-dependent follow-up ("What's
@@ -327,6 +342,40 @@ def build_rewrite_fn(backend: str, client):
     return rewrite
 
 
+def build_clarify_fn(backend: str, client):
+    """Build a closure that writes the actual clarifying-question text when
+    rag_guard's clarify stage flags a query as ambiguous.
+
+    rag_guard itself only returns a boolean + probability (see
+    `rag_guard.clarify.check_ambiguity`) -- it deliberately doesn't generate
+    free text, so this lives in the host app instead, using the same
+    generation backend/client as everything else.
+    """
+
+    def clarify(query: str, chunks: list[Chunk]) -> str:
+        context = "\n\n".join(f"[{c.id}] {c.text}" for c in chunks)
+        prompt = f"{CLARIFY_SYSTEM_PROMPT}\n\nRetrieved context:\n{context}\n\nQuestion: {query}"
+        if backend == "openai":
+            response = client.chat.completions.create(
+                model=GENERATE_MODEL_NAMES["openai"],
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=120,
+            )
+            text = (response.choices[0].message.content or "").strip()
+        else:
+            response = client.messages.create(
+                model=GENERATE_MODEL_NAMES["anthropic"],
+                max_tokens=120,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            text = "".join(
+                block.text for block in response.content if getattr(block, "type", None) == "text"
+            ).strip()
+        return text or "Could you clarify your question?"
+
+    return clarify
+
+
 def make_decision_model_for_client(backend: str, client) -> DecisionModel:
     if backend == "openai":
         return OpenAIDecisionModel(client=client)
@@ -345,8 +394,8 @@ def setup():
     """Build everything chat.py / app.py need.
 
     Returns (guard, retrieve, generate_fn, make_upload_generate_fn,
-    rewrite_query_fn, backend_info). `generate_fn` answers using the
-    Nimbus-support system prompt against the demo corpus (chat.py only).
+    rewrite_query_fn, backend_info, clarify_fn). `generate_fn` answers using
+    the Nimbus-support system prompt against the demo corpus (chat.py only).
     `make_upload_generate_fn(usage_sink=None)` is a factory, not a fixed
     function -- app.py calls it fresh per request with a new `usage_sink`
     dict so it can read back that specific call's real token usage
@@ -354,6 +403,8 @@ def setup():
     `rewrite_query_fn(query, history)` turns a context-dependent follow-up
     into a standalone one for retrieval (app.py only -- chat.py's REPL has
     no multi-turn history to rewrite against).
+    `clarify_fn(query, chunks)` writes the actual clarifying-question text
+    when rag_guard's clarify stage flags a query as ambiguous (app.py only).
     """
     client_backend, client = make_client()
     generate_fn = build_generate_fn(client_backend, client, SYSTEM_PROMPT)
@@ -362,6 +413,7 @@ def setup():
         return build_generate_fn(client_backend, client, UPLOAD_SYSTEM_PROMPT, usage_sink=usage_sink)
 
     rewrite_query_fn = build_rewrite_fn(client_backend, client)
+    clarify_fn = build_clarify_fn(client_backend, client)
 
     fallback_model = make_decision_model_for_client(client_backend, client)
     decision_backend, model = make_decision_model(fallback_model)
@@ -381,4 +433,4 @@ def setup():
         "generate_model": GENERATE_MODEL_NAMES[client_backend],
         "decision_model": decision_backend,
     }
-    return guard, retrieve, generate_fn, make_upload_generate_fn, rewrite_query_fn, backend_info
+    return guard, retrieve, generate_fn, make_upload_generate_fn, rewrite_query_fn, backend_info, clarify_fn

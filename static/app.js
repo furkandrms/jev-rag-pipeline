@@ -21,20 +21,30 @@ let thresholds = {
   sufficiency_threshold: 0.6,
   grounding_threshold: 0.5,
   grounding_min_coverage: 0.8,
+  intent_threshold: 0.5,
+  ambiguity_threshold: 0.6,
+  caveat_threshold: 0.5,
 };
 
 const STAGES = [
+  { key: "intent", label: "Intent" },
   { key: "retrieval", label: "Retrieve" },
   { key: "relevance", label: "Relevance" },
+  { key: "clarify", label: "Clarify" },
   { key: "sufficiency", label: "Sufficiency" },
   { key: "generation", label: "Generate" },
   { key: "grounding", label: "Ground" },
+  { key: "caveat", label: "Caveat" },
 ];
 
 const ACTION_LABELS = {
   answered: "Answered",
+  answered_with_caveat: "Answered — with caveat",
   insufficient_context: "Insufficient context",
   ungrounded_answer_flagged: "Ungrounded — flagged",
+  clarify: "Needs clarification",
+  escalate: "Escalated to a human",
+  refuse: "Refused",
 };
 
 // Real, session-local counters -- no fabricated numbers. Reset on page
@@ -499,7 +509,7 @@ async function sendQuery(query) {
     setStageState(container, key, state, ms);
     setStageState(sideStepperEl, key, state, ms);
   };
-  setStage("retrieval", "active");
+  setStage("intent", "active");
 
   input.value = "";
   sendBtn.disabled = true;
@@ -554,6 +564,17 @@ async function sendQuery(query) {
           setStage("grounding", "skipped");
           logLine("warn", "generation + grounding skipped — context judged insufficient");
         }
+        if (event === "intent" && data.intent.action !== "proceed") {
+          STAGES.filter((s) => s.key !== "intent").forEach((s) => setStage(s.key, "skipped"));
+          logLine("warn", `pipeline stopped — query ${data.intent.action}d before retrieval`);
+        }
+        if (event === "clarify" && data.clarify.needs_clarification) {
+          setStage("sufficiency", "skipped");
+          setStage("generation", "skipped");
+          setStage("grounding", "skipped");
+          setStage("caveat", "skipped");
+          logLine("warn", "generation skipped — question needs clarification");
+        }
         return;
       }
       if (event === "done") {
@@ -576,12 +597,16 @@ async function sendQuery(query) {
 
 function stageLogDetail(event, data) {
   switch (event) {
+    case "intent":
+      return `action=${data.intent.action} p=${data.intent.probability.toFixed(2)}`;
     case "retrieval":
       return `fetched ${data.chunk_count} chunks`;
     case "relevance": {
       const kept = data.relevance.filter((r) => r.kept).length;
       return `kept ${kept}/${data.relevance.length} chunks`;
     }
+    case "clarify":
+      return `p=${data.clarify.probability.toFixed(2)} → ${data.clarify.needs_clarification ? "needs clarification" : "clear"}`;
     case "sufficiency":
       return `p=${data.sufficiency.probability.toFixed(2)} → ${data.sufficiency.sufficient ? "sufficient" : "insufficient"}`;
     case "generation":
@@ -592,6 +617,8 @@ function stageLogDetail(event, data) {
       const supported = data.grounding.claims.filter((c) => c.supported).length;
       return `${supported}/${data.grounding.claims.length} claims supported`;
     }
+    case "caveat":
+      return `p=${data.caveat.probability.toFixed(2)} → ${data.caveat.has_caveat ? "has caveat" : "clear"}`;
     default:
       return "";
   }
