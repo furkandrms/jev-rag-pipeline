@@ -75,6 +75,7 @@ from pipeline_setup import (
     replace_session_document,
     setup,
 )
+from rag_guard import Chunk
 from rag_guard.grounding import check_grounding
 from rag_guard.relevance import filter_relevant_chunks
 from rag_guard.sufficiency import check_sufficiency
@@ -164,8 +165,29 @@ def _run_pipeline(query: str, session_id: str):
 
     t = time.monotonic()
     chunks = make_retriever(collection)(query)
+
+    # Broad "what is this document about?" queries often have little
+    # lexical/semantic overlap with the document's own title or opening
+    # paragraph, so pure similarity search can miss it even though it's
+    # usually the single most useful chunk for exactly that kind of
+    # question -- anchor it in unconditionally rather than leaving it to
+    # chance, same as a human skimming a document would start at the top.
+    meta = _session_meta.get(session_id)
+    anchor_added = False
+    if meta and meta.get("chunks") and not any(c.id.endswith("-0") for c in chunks):
+        anchor = Chunk(
+            id=f"{meta['filename']}-0", text=meta["chunks"][0], metadata={"anchor": True}
+        )
+        chunks = [anchor, *chunks]
+        anchor_added = True
+
     elapsed = _elapsed_ms(t)
-    stage_log(session_id, "retrieval", f"{len(chunks)} chunks fetched ({elapsed}ms)")
+    stage_log(
+        session_id,
+        "retrieval",
+        f"{len(chunks)} chunks fetched ({elapsed}ms)"
+        + (" [+anchor: doc opening chunk]" if anchor_added else ""),
+    )
     yield "retrieval", {"chunk_count": len(chunks), "elapsed_ms": elapsed}
 
     t = time.monotonic()
