@@ -32,7 +32,7 @@ body {
 }
 
 .app {
-  max-width: 820px;
+  max-width: 1360px;
   margin: 0 auto;
   height: 100vh;
   display: flex;
@@ -168,13 +168,56 @@ body {
   color: var(--red);
 }
 
-/* --- View B: chat, once a document is uploaded ------------------------- */
+/* --- View B: two-column layout, once a document is uploaded ------------- */
 
-.chat-view {
+.layout {
   flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.main-col {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border);
+}
+
+.side-col {
+  width: 340px;
+  flex-shrink: 0;
   display: flex;
   flex-direction: column;
   min-height: 0;
+}
+
+.side-section {
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--border);
+}
+
+.side-section-chunks {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  max-height: 260px;
+}
+
+.side-section-grow {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.side-title {
+  margin: 0 0 10px;
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-dim);
 }
 
 .doc-bar {
@@ -198,13 +241,6 @@ body {
   max-width: 60%;
 }
 
-.doc-bar-actions {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-}
-
-.doc-link-btn,
 .doc-change-btn {
   background: none;
   border: none;
@@ -215,29 +251,25 @@ body {
   padding: 2px;
 }
 
-.doc-link-btn:hover,
 .doc-change-btn:hover {
   text-decoration: underline;
 }
 
-/* --- Chunk grid ---------------------------------------------------------- */
+/* --- Chunk list (sidebar) -------------------------------------------------- */
 
 .chunks-panel {
-  border-bottom: 1px solid var(--border);
-  padding: 16px 22px;
-  max-height: 260px;
   overflow-y: auto;
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: 10px;
-  background: var(--bg-elevated);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
 }
 
 .chunk-card {
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: 10px;
-  padding: 10px 12px;
+  padding: 8px 10px;
 }
 
 .chunk-card-index {
@@ -250,46 +282,99 @@ body {
 }
 
 .chunk-card-text {
-  font-size: 11.5px;
+  font-size: 11px;
   color: var(--text-dim);
   line-height: 1.5;
-  max-height: 72px;
+  max-height: 54px;
   overflow: hidden;
-  text-overflow: ellipsis;
   display: -webkit-box;
-  -webkit-line-clamp: 4;
+  -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
 }
 
-/* --- Metrics strip --------------------------------------------------------- */
+/* --- Metrics grid (sidebar) -------------------------------------------------- */
 
-.metrics-strip {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 18px;
-  padding: 10px 22px;
-  border-bottom: 1px solid var(--border);
-  background: linear-gradient(180deg, rgba(124, 159, 255, 0.05), transparent);
+.metrics-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
 }
 
 .metric-item {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px 10px;
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 2px;
 }
 
 .metric-value {
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 700;
   color: var(--accent);
 }
 
 .metric-label {
-  font-size: 9.5px;
+  font-size: 9px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: var(--text-dim);
+}
+
+.metrics-empty,
+.chunks-empty {
+  font-size: 11.5px;
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+/* --- Activity log (sidebar) -------------------------------------------------- */
+
+.activity-log {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  background: #07080b;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 10.5px;
+  line-height: 1.7;
+}
+
+.log-line {
+  display: flex;
+  gap: 7px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  animation: rise 0.2s ease;
+}
+
+.log-time {
+  color: #4b5366;
+  flex-shrink: 0;
+}
+
+.log-icon {
+  flex-shrink: 0;
+}
+
+.log-icon.ok { color: var(--green); }
+.log-icon.warn { color: var(--yellow); }
+.log-icon.fail { color: var(--red); }
+.log-icon.info { color: var(--accent); }
+.log-icon.cache { color: var(--yellow); }
+
+.log-text {
+  color: #c4cad8;
+}
+
+.log-text b {
+  color: var(--text);
 }
 
 /* --- Live stage stepper ----------------------------------------------------- */
@@ -789,4 +874,48 @@ body {
 .chat::-webkit-scrollbar-thumb {
   background: var(--border);
   border-radius: 999px;
+}
+
+.activity-log::-webkit-scrollbar,
+.chunks-panel::-webkit-scrollbar {
+  width: 6px;
+}
+
+.activity-log::-webkit-scrollbar-thumb,
+.chunks-panel::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 999px;
+}
+
+@media (max-width: 860px) {
+  body {
+    overflow: auto;
+    height: auto;
+  }
+
+  .app {
+    height: auto;
+    min-height: 100vh;
+  }
+
+  .layout {
+    flex-direction: column;
+  }
+
+  .main-col {
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .chat {
+    max-height: 60vh;
+  }
+
+  .side-col {
+    width: 100%;
+  }
+
+  .side-section-grow {
+    min-height: 240px;
+  }
 }

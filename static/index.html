@@ -40,37 +40,49 @@
     </main>
 
     <!-- View B: shown once a document is uploaded for this session -->
-    <div class="chat-view" id="view-chat" hidden>
-      <div class="doc-bar">
-        <span class="doc-chip" id="doc-chip"></span>
-        <div class="doc-bar-actions">
-          <button type="button" class="doc-link-btn" id="chunks-toggle">View chunks</button>
+    <div class="layout" id="view-chat" hidden>
+      <div class="main-col">
+        <div class="doc-bar">
+          <span class="doc-chip" id="doc-chip"></span>
           <button type="button" class="doc-change-btn" id="doc-change-btn">Upload a different document</button>
         </div>
+
+        <main class="chat" id="chat">
+          <div class="intro" id="intro-chat">
+            <p>Ask something about the document you uploaded.</p>
+            <p class="intro-hint">Watch the activity log on the right -- it shows exactly what the system did at each stage, live.</p>
+          </div>
+        </main>
+
+        <form class="composer" id="composer">
+          <input
+            type="text"
+            id="query-input"
+            placeholder="Ask a question about your document"
+            autocomplete="off"
+          />
+          <button type="submit" id="send-btn">
+            <span class="send-label">Ask</span>
+          </button>
+        </form>
       </div>
 
-      <div class="chunks-panel" id="chunks-panel" hidden></div>
-
-      <div class="metrics-strip" id="metrics-strip" hidden></div>
-
-      <main class="chat" id="chat">
-        <div class="intro" id="intro-chat">
-          <p>Ask something about the document you uploaded.</p>
-          <p class="intro-hint">Watch the pipeline run live -- retrieval, relevance, sufficiency, generation, and grounding, each with real timing and token counts.</p>
+      <aside class="side-col">
+        <div class="side-section">
+          <h3 class="side-title">Session metrics</h3>
+          <div class="metrics-grid" id="metrics-strip"></div>
         </div>
-      </main>
 
-      <form class="composer" id="composer">
-        <input
-          type="text"
-          id="query-input"
-          placeholder="Ask a question about your document"
-          autocomplete="off"
-        />
-        <button type="submit" id="send-btn">
-          <span class="send-label">Ask</span>
-        </button>
-      </form>
+        <div class="side-section side-section-chunks">
+          <h3 class="side-title" id="chunks-title">Document chunks</h3>
+          <div class="chunks-panel" id="chunks-panel"></div>
+        </div>
+
+        <div class="side-section side-section-grow">
+          <h3 class="side-title">Activity log</h3>
+          <div class="activity-log" id="activity-log"></div>
+        </div>
+      </aside>
     </div>
   </div>
 

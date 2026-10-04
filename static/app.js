@@ -12,9 +12,9 @@ const uploadStatusEl = document.getElementById("upload-status");
 const fileInputEl = document.getElementById("file-input");
 const docChipEl = document.getElementById("doc-chip");
 const docChangeBtnEl = document.getElementById("doc-change-btn");
-const chunksToggleEl = document.getElementById("chunks-toggle");
 const chunksPanelEl = document.getElementById("chunks-panel");
 const metricsStripEl = document.getElementById("metrics-strip");
+const activityLogEl = document.getElementById("activity-log");
 
 let thresholds = {
   relevance_threshold: 0.5,
@@ -72,6 +72,26 @@ function pct(p) {
   return `${Math.round(p * 100)}%`;
 }
 
+/* --- Activity log ----------------------------------------------------------- */
+// A live, timestamped record of what the system actually did -- every line
+// here corresponds to a real event the backend reported, not a simulated
+// status message.
+
+function logTime() {
+  const d = new Date();
+  return d.toTimeString().slice(0, 8) + "." + String(d.getMilliseconds()).padStart(3, "0");
+}
+
+function logLine(icon, html) {
+  const line = document.createElement("div");
+  line.className = "log-line";
+  line.innerHTML = `<span class="log-time">${logTime()}</span><span class="log-icon ${icon}">${
+    { ok: "✓", warn: "●", fail: "✗", info: "›", cache: "⚡" }[icon] || "›"
+  }</span><span class="log-text">${html}</span>`;
+  activityLogEl.appendChild(line);
+  activityLogEl.scrollTop = activityLogEl.scrollHeight;
+}
+
 async function loadInfo() {
   try {
     const res = await fetch("/api/info");
@@ -98,6 +118,7 @@ function showChatView(filename, chunkCount, chunks) {
   viewChatEl.hidden = false;
   docChipEl.textContent = `📄 ${filename} · ${chunkCount} chunks`;
   renderChunksPanel(chunks || []);
+  renderMetricsStrip();
   input.focus();
 }
 
@@ -107,6 +128,7 @@ async function checkExistingDocument() {
     const data = await res.json();
     if (data.uploaded) {
       showChatView(data.filename, data.chunk_count, data.chunks);
+      logLine("info", `resumed session with <b>${escapeHtml(data.filename)}</b> · ${data.chunk_count} chunks`);
     } else {
       showUploadView();
     }
@@ -147,10 +169,12 @@ async function uploadFile(file) {
     Object.assign(sessionMetrics, {
       queries: 0, cacheHits: 0, inputTokens: 0, outputTokens: 0, decisionCalls: 0, latencies: [],
     });
-    metricsStripEl.hidden = true;
+    activityLogEl.innerHTML = "";
     uploadLabelEl.textContent = `Drop a .txt / .md / .pdf here, or click to choose a file`;
     uploadStatusEl.textContent = "";
     showChatView(data.filename, data.chunk_count, data.chunks);
+    renderMetricsStrip();
+    logLine("ok", `document indexed: <b>${escapeHtml(data.filename)}</b> · ${data.chunk_count} chunks`);
   } catch (e) {
     uploadLabelEl.textContent = `Drop a .txt / .md / .pdf here, or click to choose a file`;
     uploadStatusEl.textContent = e.message || "Upload failed";
@@ -187,6 +211,11 @@ docChangeBtnEl.addEventListener("click", () => {
 /* --- Chunk panel -------------------------------------------------------------- */
 
 function renderChunksPanel(chunks) {
+  document.getElementById("chunks-title").textContent = `Document chunks (${chunks.length})`;
+  if (!chunks.length) {
+    chunksPanelEl.innerHTML = `<div class="chunks-empty">No chunks indexed.</div>`;
+    return;
+  }
   chunksPanelEl.innerHTML = chunks
     .map(
       (text, i) => `
@@ -196,25 +225,18 @@ function renderChunksPanel(chunks) {
       </div>`
     )
     .join("");
-  chunksPanelEl.hidden = true;
-  chunksToggleEl.textContent = `View chunks (${chunks.length})`;
 }
-
-chunksToggleEl.addEventListener("click", () => {
-  chunksPanelEl.hidden = !chunksPanelEl.hidden;
-});
 
 /* --- Metrics strip -------------------------------------------------------------- */
 
 function renderMetricsStrip() {
   if (sessionMetrics.queries === 0) {
-    metricsStripEl.hidden = true;
+    metricsStripEl.innerHTML = `<div class="metrics-empty">Ask a question to see live metrics.</div>`;
     return;
   }
   const avgLatency = sessionMetrics.latencies.length
     ? Math.round(sessionMetrics.latencies.reduce((a, b) => a + b, 0) / sessionMetrics.latencies.length)
     : 0;
-  metricsStripEl.hidden = false;
   metricsStripEl.innerHTML = `
     <div class="metric-item"><span class="metric-value">${sessionMetrics.queries}</span><span class="metric-label">Queries</span></div>
     <div class="metric-item"><span class="metric-value">${sessionMetrics.decisionCalls}</span><span class="metric-label">Decision calls</span></div>
@@ -439,10 +461,13 @@ async function sendQuery(query) {
     }
   };
 
+  logLine("info", `query: <b>${escapeHtml(query)}</b>`);
+
   try {
     await streamChat(query, (event, data) => {
       if (event === "error") {
         container.querySelector(".msg-bubble").textContent = data.detail;
+        logLine("fail", escapeHtml(data.detail));
         return;
       }
       if (event === "cached") {
@@ -450,10 +475,13 @@ async function sendQuery(query) {
         clearBubble();
         finalizeMessage(container, data);
         recordMetrics(data, data.total_elapsed_ms, true);
+        logLine("cache", `cache hit -- served in ${data.total_elapsed_ms}ms, pipeline skipped`);
         return;
       }
       if (STAGES.some((s) => s.key === event)) {
         setStageState(container, event, "done", data.elapsed_ms);
+        logLine("ok", `<b>${event}</b> ${stageLogDetail(event, data)} (${data.elapsed_ms}ms)`);
+
         // Mark the next stage "active" (pulsing) so the stepper visibly
         // progresses even though SSE only tells us about completions.
         const idx = STAGES.findIndex((s) => s.key === event);
@@ -463,6 +491,7 @@ async function sendQuery(query) {
         if (event === "sufficiency" && !data.sufficiency.sufficient) {
           setStageState(container, "generation", "skipped");
           setStageState(container, "grounding", "skipped");
+          logLine("warn", "generation + grounding skipped -- context judged insufficient");
         }
         return;
       }
@@ -470,12 +499,40 @@ async function sendQuery(query) {
         clearBubble();
         finalizeMessage(container, data.report);
         recordMetrics(data.report, data.total_elapsed_ms, false);
+        logLine(
+          data.report.action === "answered" ? "ok" : "warn",
+          `done -- <b>${escapeHtml(data.report.action)}</b> (${data.total_elapsed_ms}ms total)`
+        );
       }
     });
   } catch (e) {
     container.querySelector(".msg-bubble").textContent = "Something went wrong talking to the backend.";
+    logLine("fail", "request failed");
   } finally {
     sendBtn.disabled = false;
+  }
+}
+
+function stageLogDetail(event, data) {
+  switch (event) {
+    case "retrieval":
+      return `fetched ${data.chunk_count} chunks`;
+    case "relevance": {
+      const kept = data.relevance.filter((r) => r.kept).length;
+      return `kept ${kept}/${data.relevance.length} chunks`;
+    }
+    case "sufficiency":
+      return `p=${data.sufficiency.probability.toFixed(2)} → ${data.sufficiency.sufficient ? "sufficient" : "insufficient"}`;
+    case "generation":
+      return data.usage && (data.usage.input_tokens || data.usage.output_tokens)
+        ? `${data.usage.input_tokens}→${data.usage.output_tokens} tokens`
+        : "answer generated";
+    case "grounding": {
+      const supported = data.grounding.claims.filter((c) => c.supported).length;
+      return `${supported}/${data.grounding.claims.length} claims supported`;
+    }
+    default:
+      return "";
   }
 }
 
