@@ -1,18 +1,17 @@
+const viewUploadEl = document.getElementById("view-upload");
+const viewChatEl = document.getElementById("view-chat");
 const chatEl = document.getElementById("chat");
 const composer = document.getElementById("composer");
 const input = document.getElementById("query-input");
 const sendBtn = document.getElementById("send-btn");
 const template = document.getElementById("message-template");
 const badgesEl = document.getElementById("backend-badges");
-const brandTitleEl = document.getElementById("brand-title");
-const modeToggleEl = document.getElementById("mode-toggle");
-const uploadZoneEl = document.getElementById("upload-zone");
 const uploadDropEl = document.getElementById("upload-drop");
 const uploadLabelEl = document.getElementById("upload-label");
 const uploadStatusEl = document.getElementById("upload-status");
 const fileInputEl = document.getElementById("file-input");
-const introDemoEl = document.getElementById("intro-demo");
-const introUploadEl = document.getElementById("intro-upload");
+const docChipEl = document.getElementById("doc-chip");
+const docChangeBtnEl = document.getElementById("doc-change-btn");
 
 let thresholds = {
   relevance_threshold: 0.5,
@@ -20,9 +19,6 @@ let thresholds = {
   grounding_threshold: 0.5,
   grounding_min_coverage: 0.8,
 };
-
-let mode = "demo"; // "demo" | "upload"
-let hasUploadedDoc = false;
 
 const ACTION_LABELS = {
   answered: "Answered",
@@ -50,39 +46,39 @@ async function loadInfo() {
     const data = await res.json();
     if (data.thresholds) thresholds = data.thresholds;
     badgesEl.innerHTML = `
-      <span class="backend-badge">generate_fn: <b>${data.generate_fn}</b></span>
-      <span class="backend-badge">decisions: <b>${data.decision_model}</b></span>
+      <span class="backend-badge">generate_fn: <b>${escapeHtml(data.generate_fn)}</b></span>
+      <span class="backend-badge">decisions: <b>${escapeHtml(data.decision_model)}</b></span>
     `;
   } catch (e) {
     badgesEl.innerHTML = `<span class="backend-badge">backend info unavailable</span>`;
   }
 }
 
-function setMode(next) {
-  mode = next;
-  modeToggleEl.querySelectorAll(".mode-btn").forEach((btn) => {
-    btn.classList.toggle("active", btn.dataset.mode === next);
-  });
-  uploadZoneEl.hidden = next !== "upload";
-  introDemoEl.hidden = next !== "demo";
-  introUploadEl.hidden = next !== "upload";
-  brandTitleEl.textContent = next === "demo" ? "Nimbus support" : "Your document";
-
-  if (next === "upload") {
-    input.disabled = !hasUploadedDoc;
-    input.placeholder = hasUploadedDoc
-      ? "Ask something about the uploaded document"
-      : "Upload a document above first";
-  } else {
-    input.disabled = false;
-    input.placeholder = "How do I restart the ingest service?";
-  }
+function showUploadView() {
+  viewUploadEl.hidden = false;
+  viewChatEl.hidden = true;
 }
 
-modeToggleEl.addEventListener("click", (e) => {
-  const btn = e.target.closest(".mode-btn");
-  if (btn) setMode(btn.dataset.mode);
-});
+function showChatView(filename, chunkCount) {
+  viewUploadEl.hidden = true;
+  viewChatEl.hidden = false;
+  docChipEl.textContent = `📄 ${filename} · ${chunkCount} chunks`;
+  input.focus();
+}
+
+async function checkExistingDocument() {
+  try {
+    const res = await fetch("/api/document-status", { headers: { "X-Session-Id": sessionId } });
+    const data = await res.json();
+    if (data.uploaded) {
+      showChatView(data.filename, data.chunk_count);
+    } else {
+      showUploadView();
+    }
+  } catch (e) {
+    showUploadView();
+  }
+}
 
 async function uploadFile(file) {
   uploadLabelEl.textContent = `Uploading ${file.name}…`;
@@ -103,14 +99,17 @@ async function uploadFile(file) {
       throw new Error(data.detail || "Upload failed");
     }
 
-    hasUploadedDoc = true;
+    // Fresh document for this session -- clear any previous conversation
+    // so old answers don't sit alongside a different document's context.
+    chatEl.innerHTML = `
+      <div class="intro">
+        <p>Ask something about the document you uploaded.</p>
+        <p class="intro-hint">Every answer includes a reasoning trace -- click <strong>Why this answer?</strong> to see it.</p>
+      </div>
+    `;
     uploadLabelEl.textContent = `Drop a .txt / .md / .pdf here, or click to choose a file`;
-    uploadStatusEl.textContent = `✓ ${data.filename} — ${data.chunk_count} chunks indexed`;
-    uploadStatusEl.className = "upload-status ok";
-    if (mode === "upload") {
-      input.disabled = false;
-      input.placeholder = "Ask something about the uploaded document";
-    }
+    uploadStatusEl.textContent = "";
+    showChatView(data.filename, data.chunk_count);
   } catch (e) {
     uploadLabelEl.textContent = `Drop a .txt / .md / .pdf here, or click to choose a file`;
     uploadStatusEl.textContent = e.message || "Upload failed";
@@ -137,6 +136,11 @@ fileInputEl.addEventListener("change", () => {
 uploadDropEl.addEventListener("drop", (e) => {
   const file = e.dataTransfer.files[0];
   if (file) uploadFile(file);
+});
+
+docChangeBtnEl.addEventListener("click", () => {
+  fileInputEl.value = "";
+  showUploadView();
 });
 
 function addUserMessage(text) {
@@ -170,10 +174,14 @@ function buildRelevanceStage(relevance) {
     .map((r) => {
       const kept = r.kept;
       const snippet = r.text.length > 90 ? r.text.slice(0, 90) + "…" : r.text;
+      // escapeHtml() on chunk_id too: it's derived from the uploaded
+      // filename, which is attacker-controllable -- never trust it raw
+      // in HTML, even though it's just an id string.
+      const safeId = escapeHtml(r.chunk_id);
       return `
         <div>
           <div class="chunk-row">
-            <span class="chunk-id" title="${r.chunk_id}">${r.chunk_id}</span>
+            <span class="chunk-id" title="${safeId}">${safeId}</span>
             <div class="chunk-bar-track">
               <div class="chunk-bar-fill ${kept ? "kept" : "dropped"}" style="width:${pct(r.probability)}"></div>
             </div>
@@ -230,7 +238,6 @@ function escapeHtml(s) {
 
 function renderAssistantMessage(container, report) {
   container.classList.remove("pending");
-  const bubble = container.querySelector(".msg-bubble");
   const badge = container.querySelector(".action-badge");
   const textEl = container.querySelector(".msg-text");
   const tracePanel = container.querySelector(".trace-panel");
@@ -278,7 +285,7 @@ async function sendQuery(query) {
     const res = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Session-Id": sessionId },
-      body: JSON.stringify({ query, mode }),
+      body: JSON.stringify({ query }),
     });
     const report = await res.json();
 
@@ -299,9 +306,9 @@ async function sendQuery(query) {
 composer.addEventListener("submit", (e) => {
   e.preventDefault();
   const q = input.value.trim();
-  if (!q || input.disabled) return;
+  if (!q) return;
   sendQuery(q);
 });
 
-setMode("demo");
+checkExistingDocument();
 loadInfo();

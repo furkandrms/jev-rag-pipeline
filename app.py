@@ -1,28 +1,43 @@
-"""FastAPI web UI for the same rag-guard pipeline chat.py runs as a REPL.
+"""FastAPI web app: upload your own document, then chat against it through rag-guard.
 
-Serves a single-page chat UI (static/) and the JSON API the frontend calls:
+There is no example/demo corpus in this app -- every answer is grounded in
+whatever document the visitor uploaded themselves, chunked and embedded at
+request time into a collection scoped to their browser session. (The
+Nimbus demo corpus still exists for chat.py, the terminal REPL used to
+smoke-test rag-guard's pipeline wiring -- it's a separate entry point and
+intentionally not part of this web app.)
 
-  POST /api/upload -- chunk an uploaded .txt/.md/.pdf into a session-scoped
-                       Chroma collection (one document per session; a new
-                       upload replaces the previous one for that session).
-  POST /api/chat    -- runs RagGuard.run() against either the demo Nimbus
-                       corpus or the caller's uploaded document (mode field)
-                       and returns the full decision trace (relevance per
-                       chunk, sufficiency, grounding per claim) alongside
-                       the answer, so the UI can show not just *what*
-                       rag-guard answered but *why*.
-  GET  /api/info    -- active backends + RagGuard's thresholds.
+JSON API the frontend calls:
+
+  GET  /api/document-status -- whether this session already has an
+                                uploaded document (so a page reload can
+                                skip straight back to the chat view).
+  POST /api/upload           -- chunk an uploaded .txt/.md/.pdf into this
+                                session's Chroma collection. A new upload
+                                replaces the previous one for that session.
+  POST /api/chat             -- runs RagGuard.run() against this session's
+                                document and returns the full decision
+                                trace (relevance per chunk, sufficiency,
+                                grounding per claim) alongside the answer,
+                                so the UI can show not just *what*
+                                rag-guard answered but *why*.
+  GET  /api/info             -- active backends + RagGuard's thresholds.
 
 Sessions are scoped by an `X-Session-Id` header the frontend mints itself
 (crypto.randomUUID(), persisted in localStorage) -- there's no login, just
 enough identity to keep one browser's uploaded document out of another's.
+See pipeline_setup.py's module docstring for the isolation guarantee this
+relies on.
 
 Run locally:
     uvicorn app:app --reload
 
-The vector store + backend selection happens once at import time (module-
-level globals below), not per-request -- rebuilding Chroma collections or
-re-resolving API clients on every chat message would be wasteful.
+The LLM/decision-model backend selection happens once at import time
+(module-level globals below), not per-request -- re-resolving API clients
+on every chat message would be wasteful. Per-session document state
+(`_session_meta`) is an in-memory dict, matching the in-memory Chroma
+client it mirrors -- both reset on process restart, by design for this
+scope (see README for the production-hardening list this implies).
 """
 
 from __future__ import annotations
@@ -45,14 +60,21 @@ from pipeline_setup import (
 
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024  # 5 MB -- generous for text/markdown/small PDFs
 
-app = FastAPI(title="rag-guard chat")
+app = FastAPI(title="rag-guard document chat")
 
-_guard, _retrieve, _generate_fn, _upload_generate_fn, _backend_info = setup()
+# setup() also builds the Nimbus demo corpus and its generate_fn, since
+# chat.py (a separate entry point) needs them -- this app only uses the
+# pieces relevant to the upload flow (_guard, _upload_generate_fn).
+_guard, _, _, _upload_generate_fn, _backend_info = setup()
+
+# filename/chunk_count per session, for GET /api/document-status -- Chroma
+# itself doesn't track this metadata, so it's kept alongside the in-memory
+# vector store (see pipeline_setup.get_chroma_client).
+_session_meta: dict[str, dict] = {}
 
 
 class ChatRequest(BaseModel):
     query: str
-    mode: str = "demo"  # "demo" (Nimbus corpus) or "upload" (this session's document)
 
 
 def _serialize_report(report) -> dict:
@@ -95,6 +117,14 @@ def info() -> dict:
     }
 
 
+@app.get("/api/document-status")
+def document_status(x_session_id: str = Header(..., alias="X-Session-Id")) -> dict:
+    meta = _session_meta.get(x_session_id)
+    if meta is None or get_session_collection(x_session_id) is None:
+        return {"uploaded": False}
+    return {"uploaded": True, **meta}
+
+
 @app.post("/api/upload")
 async def upload(
     file: UploadFile = File(...),
@@ -114,28 +144,23 @@ async def upload(
         raise HTTPException(400, "No extractable text found in that file")
 
     replace_session_document(x_session_id, file.filename or "upload", chunks)
-    return {"filename": file.filename, "chunk_count": len(chunks)}
+    meta = {"filename": file.filename, "chunk_count": len(chunks)}
+    _session_meta[x_session_id] = meta
+    return meta
 
 
 @app.post("/api/chat")
-def chat(request: ChatRequest, x_session_id: str | None = Header(None, alias="X-Session-Id")) -> dict:
+def chat(request: ChatRequest, x_session_id: str = Header(..., alias="X-Session-Id")) -> dict:
     query = request.query.strip()
     if not query:
         return {"error": "empty query"}
 
-    if request.mode == "upload":
-        if not x_session_id:
-            raise HTTPException(400, "X-Session-Id header required for mode=upload")
-        collection = get_session_collection(x_session_id)
-        if collection is None:
-            raise HTTPException(400, "No document uploaded yet for this session")
-        chunks = make_retriever(collection)(query)
-        generate_fn = _upload_generate_fn
-    else:
-        chunks = _retrieve(query)
-        generate_fn = _generate_fn
+    collection = get_session_collection(x_session_id)
+    if collection is None:
+        raise HTTPException(400, "No document uploaded yet for this session")
 
-    report = _guard.run(query, chunks, generate_fn)
+    chunks = make_retriever(collection)(query)
+    report = _guard.run(query, chunks, _upload_generate_fn)
     return _serialize_report(report)
 
 

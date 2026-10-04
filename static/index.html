@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>rag-guard chat</title>
+  <title>Document chat · guarded by rag-guard</title>
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
@@ -12,51 +12,59 @@
       <div class="brand">
         <span class="brand-mark">◆</span>
         <div>
-          <div class="brand-title" id="brand-title">Nimbus support</div>
+          <div class="brand-title">Document chat</div>
           <div class="brand-sub">guarded by rag-guard</div>
         </div>
       </div>
       <div class="backend-badges" id="backend-badges"></div>
     </header>
 
-    <div class="mode-bar">
-      <div class="mode-toggle" id="mode-toggle">
-        <button type="button" class="mode-btn active" data-mode="demo">Demo corpus</button>
-        <button type="button" class="mode-btn" data-mode="upload">My document</button>
-      </div>
-
-      <div class="upload-zone" id="upload-zone" hidden>
+    <!-- View A: shown until this session has an uploaded document -->
+    <main class="upload-view" id="view-upload">
+      <div class="upload-card">
+        <h1>Upload a document to get started</h1>
+        <p class="upload-card-sub">
+          Ask it questions once it's in. Every answer comes with a reasoning
+          trace -- which parts of your document it used, whether it had
+          enough to answer confidently, and whether the answer actually
+          checks out against the text.
+        </p>
         <label class="upload-drop" id="upload-drop" for="file-input">
           <input type="file" id="file-input" accept=".txt,.md,.pdf" hidden />
           <span class="upload-icon">⇧</span>
           <span id="upload-label">Drop a .txt / .md / .pdf here, or click to choose a file</span>
         </label>
         <div class="upload-status" id="upload-status"></div>
-      </div>
-    </div>
-
-    <main class="chat" id="chat">
-      <div class="intro" id="intro-demo">
-        <p>Ask about Nimbus's ingest/query services, runbooks, incidents, or policies.</p>
-        <p class="intro-hint">Every answer includes a reasoning trace -- click <strong>Why this answer?</strong> to see it.</p>
-      </div>
-      <div class="intro" id="intro-upload" hidden>
-        <p>Upload a document above, then ask questions about it.</p>
-        <p class="intro-hint">Only your browser can see what you upload -- it's stored in a session scoped to you, and a new upload replaces the previous one.</p>
+        <p class="upload-card-note">Only your browser can see what you upload -- it's scoped to your session, never shared.</p>
       </div>
     </main>
 
-    <form class="composer" id="composer">
-      <input
-        type="text"
-        id="query-input"
-        placeholder="How do I restart the ingest service?"
-        autocomplete="off"
-      />
-      <button type="submit" id="send-btn">
-        <span class="send-label">Ask</span>
-      </button>
-    </form>
+    <!-- View B: shown once a document is uploaded for this session -->
+    <div class="chat-view" id="view-chat" hidden>
+      <div class="doc-bar">
+        <span class="doc-chip" id="doc-chip"></span>
+        <button type="button" class="doc-change-btn" id="doc-change-btn">Upload a different document</button>
+      </div>
+
+      <main class="chat" id="chat">
+        <div class="intro" id="intro-chat">
+          <p>Ask something about the document you uploaded.</p>
+          <p class="intro-hint">Every answer includes a reasoning trace -- click <strong>Why this answer?</strong> to see it.</p>
+        </div>
+      </main>
+
+      <form class="composer" id="composer">
+        <input
+          type="text"
+          id="query-input"
+          placeholder="Ask a question about your document"
+          autocomplete="off"
+        />
+        <button type="submit" id="send-btn">
+          <span class="send-label">Ask</span>
+        </button>
+      </form>
+    </div>
   </div>
 
   <template id="message-template">

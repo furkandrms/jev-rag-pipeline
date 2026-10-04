@@ -3,39 +3,37 @@
 A small, real RAG system used to test
 [rag-guard](https://github.com/furkandrms/jev-rag-guard) the way an actual
 external user would: installed via `pip`, not as an editable path into its
-own repo, wired to a real vector store, a real LLM, and a corpus rag-guard
-has never seen during its own development.
+own repo, wired to a real vector store and a real LLM.
 
-This repo has no logic of its own beyond retrieval + a chat loop --
-everything about relevance filtering, the sufficiency gate, and grounding
-checks comes from rag-guard.
+This repo has no logic of its own beyond retrieval, chunking, and a web
+app shell -- everything about relevance filtering, the sufficiency gate,
+and grounding checks comes from rag-guard.
 
 ## What's here
 
-- `corpus.py` -- ~35 documents simulating internal engineering docs for a
-  fictional company, Nimbus (onboarding, API references, runbooks, incident
-  postmortems, policies). Deliberately messier than trivia facts: several
-  runbooks share near-identical wording for different services, and a few
-  plausible questions genuinely aren't answered anywhere in the corpus --
-  both are meant to stress relevance filtering and the sufficiency gate,
-  not just confirm the easy case.
-- `pipeline_setup.py` -- shared setup (vector store, retriever, backend
-  selection) used by both entry points below, so they can't drift apart.
-- `chat.py` -- an interactive terminal REPL: type a question, see rag-guard's
-  full trace (what was kept/dropped, the sufficiency probability, the
-  action, grounding coverage) and the final answer, as plain text.
-- `app.py` + `static/` -- a web chat UI serving the same pipeline over
-  FastAPI, with two modes: chat against the built-in Nimbus corpus, or
-  **upload your own document** (.txt/.md/.pdf) and chat against that
-  instead -- this is the actual point of the whole repo: proving rag-guard
-  + Jev work on a document neither has ever seen, chunked and embedded at
-  request time, not just a pre-built demo corpus. Every assistant reply has
-  a **"Why this answer?"** toggle that expands into a visual reasoning
+Two separate entry points, sharing the same pipeline wiring:
+
+- **`app.py` + `static/` -- the web app.** Upload your own document
+  (`.txt` / `.md` / `.pdf`) and chat against it. There is no built-in demo
+  corpus here on purpose -- the whole point is proving rag-guard + Jev
+  work on a document neither has ever seen, chunked and embedded at
+  request time, not a pre-built example. Every assistant reply has a
+  **"Why this answer?"** toggle that expands into a visual reasoning
   trace: which retrieved chunks were kept vs. dropped and at what
   probability, the sufficiency gate's probability against its threshold,
   and a per-claim grounding breakdown (supported/unsupported, with
   probability). The point is to make rag-guard's decisions inspectable,
   not just its final answer.
+- **`chat.py` -- a terminal REPL**, separate from the web app, used to
+  smoke-test rag-guard's pipeline wiring against a fixed corpus
+  (`corpus.py`: ~35 documents simulating a fictional company's internal
+  engineering docs, deliberately messier than trivia facts so relevance
+  filtering and the sufficiency gate have real work to do). This is a
+  developer tool, not part of the product -- if you just want to try the
+  app, use the web UI.
+- **`pipeline_setup.py`** -- shared setup (Chroma client, chunking, file
+  text extraction, backend selection) both entry points build on, so they
+  can't drift apart on how retrieval or generation works.
 
 ## Setup
 
@@ -47,9 +45,9 @@ pip install -r requirements.txt
 cp .env.example .env
 # fill in OPENAI_API_KEY or ANTHROPIC_API_KEY, and optionally TYPESAFE_API_KEY
 
-python chat.py        # terminal REPL
+uvicorn app:app --reload   # web app at http://127.0.0.1:8000
 # or
-uvicorn app:app --reload   # web UI at http://127.0.0.1:8000
+python chat.py             # terminal REPL against the fixed demo corpus
 ```
 
 `.env` is loaded automatically (via `python-dotenv`, in `pipeline_setup.py`) --
@@ -57,40 +55,21 @@ no manual `export` step needed. If you exported these as real shell/CI
 environment variables instead, that still works too; `.env` never
 overrides a variable that's already set.
 
-## Example session
+## Web app
 
-```
-> How do I restart the ingest service?
-  retrieved: ['runbook-ingest-2', 'runbook-query-1', 'runbook-ingest-1', 'api-ingest-1']
-  kept (relevant): ['runbook-ingest-2']  dropped: ['runbook-query-1', 'runbook-ingest-1', 'api-ingest-1']
-  sufficiency: True (p=0.91)
-  action: answered
-  grounding coverage: 1.00
+`app.py` serves a single-page app (no build step -- plain HTML/CSS/JS in
+`static/`) with two views: an upload screen, and a chat screen that
+appears once a document is uploaded for your session. Reloading the page
+goes straight back to the chat screen if your session still has a
+document (`GET /api/document-status`); there's an "Upload a different
+document" link in the chat view to replace it.
 
-Use `kubectl rollout restart deployment/ingest -n prod`. This is a rolling
-restart, so no downtime is expected.
-
-> what's nimbus's data retention policy for customer PII?
-  retrieved: ['policy-security-1', 'faq-4', 'policy-security-2', 'onboard-1']
-  kept (relevant): []
-  sufficiency: False (p=0.00)
-  action: insufficient_context
-
-I don't have enough information in the retrieved context to answer this
-confidently.
-```
-
-(The second example is intentional -- the corpus has no PII-specific
-retention policy, only a general Kafka topic retention note. That's the
-sufficiency gate doing its job instead of the LLM guessing.)
-
-## Web UI
-
-`app.py` serves a single-page chat UI (no build step -- plain HTML/CSS/JS
-in `static/`) plus three JSON endpoints:
+JSON API the frontend calls:
 
 - `GET /api/info` -- which backends are active (`generate_fn`,
   `decision_model`) and the `RagGuard` thresholds currently in effect.
+- `GET /api/document-status` -- whether this session already has an
+  uploaded document, and its filename/chunk count if so.
 - `POST /api/upload` -- multipart file upload (`.txt`/`.md`/`.pdf`, 5 MB
   max). The file is chunked (`pipeline_setup.chunk_text`: paragraph-packed
   up to 800 chars, hard-split with overlap only for a single paragraph
@@ -98,10 +77,10 @@ in `static/`) plus three JSON endpoints:
   caller's `X-Session-Id` header. Uploading again replaces that session's
   previous document rather than accumulating -- one document per session,
   always the current one.
-- `POST /api/chat` -- `{"query": "...", "mode": "demo" | "upload"}` in
-  (plus `X-Session-Id` when `mode` is `"upload"`), the full `GuardReport`
-  trace out (per-chunk relevance, sufficiency, per-claim grounding,
-  answer, action).
+- `POST /api/chat` -- `{"query": "..."}` in (plus the `X-Session-Id`
+  header), the full `GuardReport` trace out (per-chunk relevance,
+  sufficiency, per-claim grounding, answer, action). Fails with a clear
+  400 if no document has been uploaded yet for that session.
 
 ### Session isolation
 
@@ -122,7 +101,7 @@ that id (same "no document uploaded yet" response) rather than ever
 returning another session's content. The tradeoff is availability, not
 correctness: running with more than one instance (or one that restarts)
 means an uploaded document can become temporarily unreachable if a later
-request lands elsewhere. For a demo/single-instance deployment (e.g. one
+request lands elsewhere. For a single-instance deployment (e.g. one
 Cloud Run instance, `min-instances=1 max-instances=1`) this doesn't come
 up at all.
 
@@ -137,8 +116,46 @@ non-technical reader can look at a flagged or rejected answer and see
 *which* stage and *which specific evidence* drove that outcome, not just
 trust a black box.
 
-The vector store and backend selection happen once at process startup
-(`pipeline_setup.setup()`), not per-request.
+Every chunk id shown in the trace is HTML-escaped before being inserted
+into the page (`static/app.js`'s `escapeHtml()`) -- chunk ids are derived
+from the uploaded filename, which is attacker-controllable, so this isn't
+optional hardening.
+
+The LLM/decision-model backend selection happens once at process startup
+(`pipeline_setup.setup()`), not per-request; per-session document
+metadata (filename, chunk count) is an in-memory dict in `app.py` that
+mirrors the in-memory Chroma client it describes -- both reset on process
+restart, which is fine for this scope (see "Known limitations" below).
+
+## Example session
+
+```
+> How do I return an electric bike?
+  retrieved: ['aurora_policy.txt-0']
+  kept (relevant): ['aurora_policy.txt-0']
+  sufficiency: True (p=0.94)
+  action: answered
+  grounding coverage: 1.00
+
+You have 14 days to return an electric bike.
+```
+
+## Known limitations / before deploying publicly
+
+- **No rate limiting or auth.** Every `/api/*` call makes a real,
+  billed API call (OpenAI/Anthropic and/or Jev). Fine for local use;
+  add rate limiting (per-IP, or a simple allowlist) before exposing this
+  publicly, or API costs become an open-ended liability.
+- **No session TTL.** Session collections and metadata live in memory for
+  the life of the process; a long-running public instance should add
+  expiry/cleanup for stale sessions.
+- **PDF parsing has no resource limit.** `pypdf` on a maliciously crafted
+  PDF could consume excessive CPU/memory; low risk for personal/internal
+  use, worth hardening before a public upload endpoint.
+- **Uploaded content goes straight into the LLM prompt** as retrieval
+  context -- a document (or question) crafted to manipulate the model is
+  a known, generally-unsolved class of risk for any RAG system, not
+  specific to this one.
 
 ## Why this repo exists
 
