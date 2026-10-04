@@ -56,6 +56,7 @@ event over SSE as it's produced.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from dataclasses import asdict
 
@@ -64,6 +65,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from pipeline_logging import stage_log
 from pipeline_setup import (
     chunk_text,
     extract_text,
@@ -144,35 +146,72 @@ def _run_pipeline(query: str, session_id: str):
     streamed as it happens instead of only seeing the final result.
     """
     t_total = time.monotonic()
+    stage_log(session_id, "query", f'"{query}"')
+
     collection = get_session_collection(session_id)
     if collection is None:
+        stage_log(session_id, "error", "no document uploaded yet", level=logging.WARNING)
         yield "error", {"detail": "No document uploaded yet for this session"}
         return
 
     cache_key = (session_id, query.strip().lower())
     cached = _response_cache.get(cache_key)
     if cached is not None:
-        yield "cached", {**cached, "total_elapsed_ms": _elapsed_ms(t_total)}
+        elapsed = _elapsed_ms(t_total)
+        stage_log(session_id, "cache_hit", f"served in {elapsed}ms, pipeline skipped")
+        yield "cached", {**cached, "total_elapsed_ms": elapsed}
         return
 
     t = time.monotonic()
     chunks = make_retriever(collection)(query)
-    yield "retrieval", {"chunk_count": len(chunks), "elapsed_ms": _elapsed_ms(t)}
+    elapsed = _elapsed_ms(t)
+    stage_log(session_id, "retrieval", f"{len(chunks)} chunks fetched ({elapsed}ms)")
+    yield "retrieval", {"chunk_count": len(chunks), "elapsed_ms": elapsed}
 
     t = time.monotonic()
     relevance = filter_relevant_chunks(
         query, chunks, _guard.model, threshold=_guard.relevance_threshold
     )
     kept_chunks = [r.chunk for r in relevance if r.kept]
-    yield "relevance", {"relevance": _serialize_relevance(relevance), "elapsed_ms": _elapsed_ms(t)}
+    elapsed = _elapsed_ms(t)
+    stage_log(
+        session_id,
+        "relevance",
+        f"kept {len(kept_chunks)}/{len(relevance)} chunks "
+        f"(threshold={_guard.relevance_threshold}) ({elapsed}ms)",
+    )
+    for r in relevance:
+        stage_log(
+            session_id,
+            "relevance",
+            f"  [{'KEEP' if r.kept else 'drop'}] p={r.probability:.2f}  {r.chunk.id}: "
+            f"{r.chunk.text[:80]!r}",
+            level=logging.DEBUG,
+        )
+    yield "relevance", {"relevance": _serialize_relevance(relevance), "elapsed_ms": elapsed}
 
     t = time.monotonic()
     sufficiency = check_sufficiency(
         query, kept_chunks, _guard.model, threshold=_guard.sufficiency_threshold
     )
-    yield "sufficiency", {"sufficiency": asdict(sufficiency), "elapsed_ms": _elapsed_ms(t)}
+    elapsed = _elapsed_ms(t)
+    stage_log(
+        session_id,
+        "sufficiency",
+        f"p={sufficiency.probability:.2f} (threshold={_guard.sufficiency_threshold}) -> "
+        f"{'sufficient' if sufficiency.sufficient else 'INSUFFICIENT'} ({elapsed}ms)",
+        level=logging.INFO if sufficiency.sufficient else logging.WARNING,
+    )
+    yield "sufficiency", {"sufficiency": asdict(sufficiency), "elapsed_ms": elapsed}
 
     if not sufficiency.sufficient:
+        total = _elapsed_ms(t_total)
+        stage_log(
+            session_id,
+            "done",
+            f"action=insufficient_context, generation skipped, total={total}ms",
+            level=logging.WARNING,
+        )
         report = {
             "query": query,
             "action": "insufficient_context",
@@ -183,14 +222,23 @@ def _run_pipeline(query: str, session_id: str):
             "metrics": {"decision_calls": len(relevance) + 1, "generation_usage": None},
         }
         _response_cache[cache_key] = report
-        yield "done", {"report": report, "total_elapsed_ms": _elapsed_ms(t_total)}
+        yield "done", {"report": report, "total_elapsed_ms": total}
         return
 
     usage_sink: dict = {}
     t = time.monotonic()
     generate_fn = _make_upload_generate_fn(usage_sink=usage_sink)
     answer = generate_fn(query, kept_chunks)
-    yield "generation", {"answer": answer, "usage": usage_sink, "elapsed_ms": _elapsed_ms(t)}
+    elapsed = _elapsed_ms(t)
+    model_name = _backend_info.get("generate_model", _backend_info["generate_fn"])
+    tokens_in = usage_sink.get("input_tokens", "?")
+    tokens_out = usage_sink.get("output_tokens", "?")
+    stage_log(
+        session_id,
+        "generation",
+        f"{model_name} | in={tokens_in} out={tokens_out} tokens ({elapsed}ms) -> {answer[:100]!r}",
+    )
+    yield "generation", {"answer": answer, "usage": usage_sink, "elapsed_ms": elapsed}
 
     grounding = None
     decision_calls = len(relevance) + 1
@@ -204,14 +252,40 @@ def _run_pipeline(query: str, session_id: str):
             min_coverage=_guard.grounding_min_coverage,
         )
         decision_calls += len(grounding.claims)
+        elapsed = _elapsed_ms(t)
+        supported = sum(1 for c in grounding.claims if c.supported)
+        stage_log(
+            session_id,
+            "grounding",
+            f"coverage={grounding.coverage:.2f} ({supported}/{len(grounding.claims)} claims "
+            f"supported, min_coverage={_guard.grounding_min_coverage}) -> "
+            f"{'grounded' if grounding.grounded else 'NOT GROUNDED -- flagging'} ({elapsed}ms)",
+            level=logging.INFO if grounding.grounded else logging.WARNING,
+        )
+        for c in grounding.claims:
+            if not c.supported:
+                stage_log(
+                    session_id,
+                    "grounding",
+                    f"  [UNSUPPORTED] p={c.probability:.2f}  {c.claim!r}",
+                    level=logging.WARNING,
+                )
         yield "grounding", {
             "grounding": _serialize_grounding(grounding),
-            "elapsed_ms": _elapsed_ms(t),
+            "elapsed_ms": elapsed,
         }
         action = "answered" if grounding.grounded else "ungrounded_answer_flagged"
     else:
         action = "answered"
 
+    total = _elapsed_ms(t_total)
+    stage_log(
+        session_id,
+        "done",
+        f"action={action}, decision_calls={decision_calls}, "
+        f"tokens={tokens_in}in/{tokens_out}out, total={total}ms",
+        level=logging.INFO if action == "answered" else logging.WARNING,
+    )
     report = {
         "query": query,
         "action": action,
@@ -222,7 +296,7 @@ def _run_pipeline(query: str, session_id: str):
         "metrics": {"decision_calls": decision_calls, "generation_usage": usage_sink or None},
     }
     _response_cache[cache_key] = report
-    yield "done", {"report": report, "total_elapsed_ms": _elapsed_ms(t_total)}
+    yield "done", {"report": report, "total_elapsed_ms": total}
 
 
 @app.get("/api/info")
@@ -269,6 +343,7 @@ async def upload(
 
     meta = {"filename": file.filename, "chunk_count": len(chunks), "chunks": chunks}
     _session_meta[x_session_id] = meta
+    stage_log(x_session_id, "upload", f"{file.filename!r} -> {len(chunks)} chunks indexed")
     return meta
 
 
@@ -277,6 +352,7 @@ def delete_document(x_session_id: str = Header(..., alias="X-Session-Id")) -> di
     remove_session_document(x_session_id)
     _clear_session_cache(x_session_id)
     _session_meta.pop(x_session_id, None)
+    stage_log(x_session_id, "remove", "document removed")
     return {"removed": True}
 
 

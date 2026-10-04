@@ -34,6 +34,10 @@ Two separate entry points, sharing the same pipeline wiring:
 - **`pipeline_setup.py`** -- shared setup (Chroma client, chunking, file
   text extraction, backend selection) both entry points build on, so they
   can't drift apart on how retrieval or generation works.
+- **`pipeline_logging.py`** -- structured per-stage console logging for
+  `app.py` (see "Server-side logging" below) -- what actually went in and
+  out of rag-guard and the LLM, independent of what any one browser
+  session's UI shows.
 
 ## Setup
 
@@ -189,6 +193,40 @@ The LLM/decision-model backend selection happens once at process startup
 metadata (filename, chunk count) is an in-memory dict in `app.py` that
 mirrors the in-memory Chroma client it describes -- both reset on process
 restart, which is fine for this scope (see "Known limitations" below).
+
+### Server-side logging
+
+The browser's activity log only tells *you* what happened in your own
+session. `pipeline_logging.py` prints the same kind of per-stage detail
+to the server console, for every request, independent of the UI --
+useful when `uvicorn app:app --reload` is the thing you're actually
+watching:
+
+```
+17:52:05 INFO    [a3f9e21c] upload      'paper.pdf' -> 24 chunks indexed
+17:52:05 INFO    [a3f9e21c] query       "What is this paper about?"
+17:52:05 INFO    [a3f9e21c] retrieval   8 chunks fetched (102.9ms)
+17:52:07 INFO    [a3f9e21c] relevance   kept 7/8 chunks (threshold=0.5) (2508.7ms)
+17:52:08 INFO    [a3f9e21c] sufficiency p=0.83 (threshold=0.45) -> sufficient (300.1ms)
+17:52:10 INFO    [a3f9e21c] generation  gpt-4o-mini | in=634 out=83 tokens (2206.8ms) -> 'This paper is about...'
+17:52:10 INFO    [a3f9e21c] grounding   coverage=1.00 (2/2 claims supported, min_coverage=0.8) -> grounded (607.5ms)
+17:52:10 INFO    [a3f9e21c] done        action=answered, decision_calls=11, tokens=634in/83out, total=5730.8ms
+```
+
+An insufficient or ungrounded result logs at `WARNING` instead of `INFO`
+(so `grep WARNING` on the server log finds every case the pipeline
+blocked or flagged something, without reading every line), and includes
+the reason inline rather than just the outcome. Set `LOG_LEVEL=DEBUG` for
+a line per chunk/claim -- the actual snippet and probability behind every
+keep/drop and supported/unsupported decision, not just the aggregate:
+
+```bash
+LOG_LEVEL=DEBUG uvicorn app:app --reload
+```
+```
+17:52:27 DEBUG   [a3f9e21c] relevance     [drop] p=0.45  paper.pdf-22: "Grace Ifechukwu holds a..."
+17:52:27 DEBUG   [a3f9e21c] relevance     [KEEP] p=0.97  paper.pdf-4: "This work is organized around..."
+```
 
 ## Example session
 
