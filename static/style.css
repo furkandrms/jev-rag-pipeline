@@ -23,6 +23,12 @@
   box-sizing: border-box;
 }
 
+/* Author `display` rules on .upload-view/.layout otherwise beat the UA
+   stylesheet's [hidden] rule, so both views would render at once. */
+[hidden] {
+  display: none !important;
+}
+
 body {
   margin: 0;
   background: radial-gradient(1200px 600px at 50% -10%, #151a27 0%, var(--bg) 55%);
@@ -58,9 +64,11 @@ body {
 }
 
 .brand-mark {
-  font-size: 22px;
-  color: var(--accent);
-  filter: drop-shadow(0 0 8px rgba(124, 159, 255, 0.5));
+  height: 34px;
+  width: auto;
+  display: block;
+  border-radius: 7px;
+  filter: drop-shadow(0 0 8px rgba(124, 159, 255, 0.35));
 }
 
 .brand-title {
