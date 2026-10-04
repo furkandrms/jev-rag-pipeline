@@ -165,9 +165,17 @@ def extract_text(filename: str, content: bytes) -> str:
         import io
 
         from pypdf import PdfReader
+        from pypdf.errors import PdfReadError
 
-        reader = PdfReader(io.BytesIO(content))
-        return "\n\n".join(page.extract_text() or "" for page in reader.pages)
+        try:
+            reader = PdfReader(io.BytesIO(content))
+            return "\n\n".join(page.extract_text() or "" for page in reader.pages)
+        except PdfReadError as exc:
+            # A malformed/corrupt/non-PDF file named .pdf raises pypdf's own
+            # exception type here, not ValueError -- without this, it was an
+            # unhandled 500 instead of the clean 400 the upload endpoint
+            # expects to be able to catch and show the user.
+            raise ValueError(f"Could not read this file as a PDF: {exc}") from exc
     raise ValueError(f"Unsupported file type: .{ext or '?'} (supported: .txt, .md, .pdf)")
 
 
