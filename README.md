@@ -62,25 +62,60 @@ overrides a variable that's already set.
 appears once a document is uploaded for your session. Reloading the page
 goes straight back to the chat screen if your session still has a
 document (`GET /api/document-status`); there's an "Upload a different
-document" link in the chat view to replace it.
+document" link in the chat view to replace it, and a "View chunks" toggle
+that shows exactly how your document was split before anything gets
+retrieved from it.
 
-JSON API the frontend calls:
+### Live pipeline, not a spinner
 
-- `GET /api/info` -- which backends are active (`generate_fn`,
-  `decision_model`) and the `RagGuard` thresholds currently in effect.
+Each reply streams in stage by stage over Server-Sent Events, as the real
+pipeline actually runs -- a small stepper lights up **Retrieve → Relevance
+→ Sufficiency → Generate → Ground** live, each with its own real elapsed
+time. If sufficiency fails, Generate/Ground visibly gray out as skipped
+instead of running pointlessly. This isn't a simulated animation: `app.py`
+calls rag-guard's own stage functions (`filter_relevant_chunks`,
+`check_sufficiency`, `check_grounding` -- the same ones `RagGuard.run()`
+calls internally) directly instead of through that one wrapper, so each
+stage's completion can be observed and pushed to the client the moment it
+actually finishes.
+
+A per-session metrics strip tracks real numbers across the conversation:
+queries asked, total decision-model calls made, tokens used (from the
+actual OpenAI/Anthropic response's `usage` field), average latency, and
+cache hits -- nothing here is fabricated or simulated.
+
+### Response cache
+
+Asking the exact same question again (for the same document) skips the
+pipeline entirely and returns the previous result in under a millisecond,
+flagged with a **⚡ served from cache** badge instead of the stepper. The
+cache is keyed on `(session_id, normalized query)`, in memory, and is
+cleared for a session the moment it uploads a new document -- a cached
+answer is only ever valid for the document it was computed against.
+
+### API
+
+- `GET /api/info` -- active backends, the real model name in use
+  (`gpt-4o-mini` / `claude-haiku-4-5` / Jev), and the `RagGuard` thresholds
+  currently in effect.
 - `GET /api/document-status` -- whether this session already has an
-  uploaded document, and its filename/chunk count if so.
+  uploaded document, its filename/chunk count, and the full chunk list.
 - `POST /api/upload` -- multipart file upload (`.txt`/`.md`/`.pdf`, 5 MB
   max). The file is chunked (`pipeline_setup.chunk_text`: paragraph-packed
   up to 800 chars, hard-split with overlap only for a single paragraph
   longer than that) and embedded into a Chroma collection scoped to the
-  caller's `X-Session-Id` header. Uploading again replaces that session's
-  previous document rather than accumulating -- one document per session,
-  always the current one.
-- `POST /api/chat` -- `{"query": "..."}` in (plus the `X-Session-Id`
-  header), the full `GuardReport` trace out (per-chunk relevance,
-  sufficiency, per-claim grounding, answer, action). Fails with a clear
-  400 if no document has been uploaded yet for that session.
+  caller's `X-Session-Id` header, and the chunk list is returned so the UI
+  can show it. Uploading again replaces that session's previous document
+  rather than accumulating -- one document per session, always the current
+  one -- and clears that session's response cache.
+- `POST /api/chat` -- plain JSON version: `{"query": "..."}` in, the full
+  `GuardReport` trace plus real metrics out. Blocks until done; used by
+  curl/tests. Fails with a clear 400 if no document has been uploaded yet.
+- `POST /api/chat/stream` -- same pipeline, as Server-Sent Events: one
+  event per stage (`retrieval`, `relevance`, `sufficiency`, `generation`,
+  `grounding`, each with `elapsed_ms`) as it actually completes, then a
+  final `done` event with the full report -- or a single `cached` event
+  on a cache hit. This is what the web UI uses.
 
 ### Session isolation
 
@@ -146,9 +181,9 @@ You have 14 days to return an electric bike.
   billed API call (OpenAI/Anthropic and/or Jev). Fine for local use;
   add rate limiting (per-IP, or a simple allowlist) before exposing this
   publicly, or API costs become an open-ended liability.
-- **No session TTL.** Session collections and metadata live in memory for
-  the life of the process; a long-running public instance should add
-  expiry/cleanup for stale sessions.
+- **No session TTL.** Session collections, metadata, and the response
+  cache all live in memory for the life of the process; a long-running
+  public instance should add expiry/cleanup for stale sessions.
 - **PDF parsing has no resource limit.** `pypdf` on a maliciously crafted
   PDF could consume excessive CPU/memory; low risk for personal/internal
   use, worth hardening before a public upload endpoint.

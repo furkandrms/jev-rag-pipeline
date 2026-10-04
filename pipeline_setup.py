@@ -43,6 +43,8 @@ UPLOAD_SYSTEM_PROMPT = (
     "answer, say so plainly -- do not guess."
 )
 
+GENERATE_MODEL_NAMES = {"openai": "gpt-4o-mini", "anthropic": "claude-haiku-4-5"}
+
 _chroma_client = None
 
 
@@ -194,13 +196,22 @@ def make_client() -> tuple[str, object]:
     raise SystemExit(1)
 
 
-def build_generate_fn(backend: str, client, system_prompt: str) -> GenerateFn:
+def build_generate_fn(
+    backend: str, client, system_prompt: str, usage_sink: dict | None = None
+) -> GenerateFn:
+    """Build the generation closure for `backend`.
+
+    `usage_sink`, if given, gets the real token usage from the underlying
+    API response written into it as a side effect (`{"input_tokens": ...,
+    "output_tokens": ...}`) -- the only way to surface it, since `GenerateFn`
+    itself must return a plain string to satisfy RagGuard's contract.
+    """
     if backend == "openai":
 
         def generate(query: str, chunks: list[Chunk]) -> str:
             context = "\n\n".join(f"[{c.id}] {c.text}" for c in chunks)
             response = client.chat.completions.create(
-                model="gpt-4o-mini",
+                model=GENERATE_MODEL_NAMES["openai"],
                 messages=[
                     {
                         "role": "user",
@@ -208,6 +219,9 @@ def build_generate_fn(backend: str, client, system_prompt: str) -> GenerateFn:
                     }
                 ],
             )
+            if usage_sink is not None and response.usage is not None:
+                usage_sink["input_tokens"] = response.usage.prompt_tokens
+                usage_sink["output_tokens"] = response.usage.completion_tokens
             return response.choices[0].message.content
 
         return generate
@@ -217,7 +231,7 @@ def build_generate_fn(backend: str, client, system_prompt: str) -> GenerateFn:
         def generate(query: str, chunks: list[Chunk]) -> str:
             context = "\n\n".join(f"[{c.id}] {c.text}" for c in chunks)
             response = client.messages.create(
-                model="claude-haiku-4-5",
+                model=GENERATE_MODEL_NAMES["anthropic"],
                 max_tokens=300,
                 messages=[
                     {
@@ -226,6 +240,9 @@ def build_generate_fn(backend: str, client, system_prompt: str) -> GenerateFn:
                     }
                 ],
             )
+            if usage_sink is not None and response.usage is not None:
+                usage_sink["input_tokens"] = response.usage.input_tokens
+                usage_sink["output_tokens"] = response.usage.output_tokens
             return "".join(
                 block.text for block in response.content if getattr(block, "type", None) == "text"
             )
@@ -252,19 +269,27 @@ def make_decision_model(fallback: DecisionModel) -> tuple[str, DecisionModel]:
 def setup():
     """Build everything chat.py / app.py need.
 
-    Returns (guard, retrieve, generate_fn, upload_generate_fn, backend_info).
+    Returns (guard, retrieve, generate_fn, make_upload_generate_fn, backend_info).
     `generate_fn` answers using the Nimbus-support system prompt against the
-    demo corpus; `upload_generate_fn` uses a generic system prompt suited to
-    an arbitrary uploaded document. Both share one LLM client and, unless
-    Jev is configured, one decision model.
+    demo corpus (chat.py only). `make_upload_generate_fn(usage_sink=None)` is
+    a factory, not a fixed function -- app.py calls it fresh per request with
+    a new `usage_sink` dict so it can read back that specific call's real
+    token usage afterward, without building a whole new client each time.
     """
     client_backend, client = make_client()
     generate_fn = build_generate_fn(client_backend, client, SYSTEM_PROMPT)
-    upload_generate_fn = build_generate_fn(client_backend, client, UPLOAD_SYSTEM_PROMPT)
+
+    def make_upload_generate_fn(usage_sink: dict | None = None) -> GenerateFn:
+        return build_generate_fn(client_backend, client, UPLOAD_SYSTEM_PROMPT, usage_sink=usage_sink)
+
     fallback_model = make_decision_model_for_client(client_backend, client)
     decision_backend, model = make_decision_model(fallback_model)
     collection = build_vector_store()
     retrieve = make_retriever(collection)
     guard = RagGuard(model=model)
-    backend_info = {"generate_fn": client_backend, "decision_model": decision_backend}
-    return guard, retrieve, generate_fn, upload_generate_fn, backend_info
+    backend_info = {
+        "generate_fn": client_backend,
+        "generate_model": GENERATE_MODEL_NAMES[client_backend],
+        "decision_model": decision_backend,
+    }
+    return guard, retrieve, generate_fn, make_upload_generate_fn, backend_info

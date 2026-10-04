@@ -7,21 +7,29 @@ Nimbus demo corpus still exists for chat.py, the terminal REPL used to
 smoke-test rag-guard's pipeline wiring -- it's a separate entry point and
 intentionally not part of this web app.)
 
-JSON API the frontend calls:
+JSON/SSE API the frontend calls:
 
   GET  /api/document-status -- whether this session already has an
-                                uploaded document (so a page reload can
-                                skip straight back to the chat view).
+                                uploaded document, its chunk list, and
+                                chunk count (so a page reload can skip
+                                straight back to the chat view).
   POST /api/upload           -- chunk an uploaded .txt/.md/.pdf into this
                                 session's Chroma collection. A new upload
-                                replaces the previous one for that session.
-  POST /api/chat             -- runs RagGuard.run() against this session's
-                                document and returns the full decision
-                                trace (relevance per chunk, sufficiency,
-                                grounding per claim) alongside the answer,
-                                so the UI can show not just *what*
-                                rag-guard answered but *why*.
-  GET  /api/info             -- active backends + RagGuard's thresholds.
+                                replaces the previous one for that session
+                                and clears its response cache (see below).
+  POST /api/chat             -- plain JSON request/response version of the
+                                pipeline (used by curl/tests); blocks until
+                                the full result is ready.
+  POST /api/chat/stream      -- Server-Sent Events version of the same
+                                pipeline: emits one event per rag-guard
+                                stage (retrieval, relevance, sufficiency,
+                                generation, grounding) as it actually
+                                completes, each with that stage's real
+                                elapsed time, finishing with a `done` event
+                                carrying the full report. This is what the
+                                web UI uses for the live-progress view.
+  GET  /api/info             -- active backends, model names, and
+                                RagGuard's thresholds.
 
 Sessions are scoped by an `X-Session-Id` header the frontend mints itself
 (crypto.randomUUID(), persisted in localStorage) -- there's no login, just
@@ -32,20 +40,23 @@ relies on.
 Run locally:
     uvicorn app:app --reload
 
-The LLM/decision-model backend selection happens once at import time
-(module-level globals below), not per-request -- re-resolving API clients
-on every chat message would be wasteful. Per-session document state
-(`_session_meta`) is an in-memory dict, matching the in-memory Chroma
-client it mirrors -- both reset on process restart, by design for this
-scope (see README for the production-hardening list this implies).
+Both endpoints run the *same* stage-by-stage orchestration
+(`_run_pipeline`, a generator) -- it mirrors exactly what `RagGuard.run()`
+does internally (relevance -> sufficiency -> generate -> grounding), just
+broken into visible steps instead of one opaque call, so real per-stage
+timing can be measured and streamed. `/api/chat` simply drains the
+generator and returns its last event; `/api/chat/stream` relays every
+event over SSE as it's produced.
 """
 
 from __future__ import annotations
 
+import json
+import time
 from dataclasses import asdict
 
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -57,6 +68,9 @@ from pipeline_setup import (
     replace_session_document,
     setup,
 )
+from rag_guard.grounding import check_grounding
+from rag_guard.relevance import filter_relevant_chunks
+from rag_guard.sufficiency import check_sufficiency
 
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024  # 5 MB -- generous for text/markdown/small PDFs
 
@@ -64,44 +78,141 @@ app = FastAPI(title="rag-guard document chat")
 
 # setup() also builds the Nimbus demo corpus and its generate_fn, since
 # chat.py (a separate entry point) needs them -- this app only uses the
-# pieces relevant to the upload flow (_guard, _upload_generate_fn).
-_guard, _, _, _upload_generate_fn, _backend_info = setup()
+# pieces relevant to the upload flow (_guard, _make_upload_generate_fn).
+_guard, _, _, _make_upload_generate_fn, _backend_info = setup()
 
-# filename/chunk_count per session, for GET /api/document-status -- Chroma
-# itself doesn't track this metadata, so it's kept alongside the in-memory
-# vector store (see pipeline_setup.get_chroma_client).
+# Per-session state, in-memory (mirrors the in-memory Chroma client it
+# describes -- both reset on process restart, see README's "known
+# limitations" section):
+#   _session_meta: filename/chunk list/chunk count, for /api/document-status
+#   _response_cache: (session_id, normalized query) -> last full report,
+#     so re-asking the same question skips the pipeline entirely. Cleared
+#     for a session whenever that session uploads a new document, since a
+#     cached answer is only valid for the document it was computed against.
 _session_meta: dict[str, dict] = {}
+_response_cache: dict[tuple[str, str], dict] = {}
 
 
 class ChatRequest(BaseModel):
     query: str
 
 
-def _serialize_report(report) -> dict:
+def _elapsed_ms(start: float) -> float:
+    return round((time.monotonic() - start) * 1000, 1)
+
+
+def _serialize_relevance(relevance) -> list[dict]:
+    return [
+        {
+            "chunk_id": r.chunk.id,
+            "text": r.chunk.text,
+            "probability": r.probability,
+            "kept": r.kept,
+        }
+        for r in relevance
+    ]
+
+
+def _serialize_grounding(grounding) -> dict | None:
+    if grounding is None:
+        return None
     return {
-        "query": report.query,
-        "action": report.action,
-        "answer": report.answer,
-        "relevance": [
-            {
-                "chunk_id": r.chunk.id,
-                "text": r.chunk.text,
-                "probability": r.probability,
-                "kept": r.kept,
-            }
-            for r in report.relevance
-        ],
-        "sufficiency": asdict(report.sufficiency),
-        "grounding": (
-            {
-                "grounded": report.grounding.grounded,
-                "coverage": report.grounding.coverage,
-                "claims": [asdict(c) for c in report.grounding.claims],
-            }
-            if report.grounding is not None
-            else None
-        ),
+        "grounded": grounding.grounded,
+        "coverage": grounding.coverage,
+        "claims": [asdict(c) for c in grounding.claims],
     }
+
+
+def _run_pipeline(query: str, session_id: str):
+    """Generator yielding (event_name, data) as each real pipeline stage completes.
+
+    Mirrors RagGuard.run()'s own stage order exactly (see
+    rag_guard/pipeline.py) -- this isn't a reimplementation of the
+    decision logic, just the same public calls RagGuard.run() makes
+    internally, called directly instead of through that one wrapper, so
+    each stage's completion (and real elapsed time) can be observed and
+    streamed as it happens instead of only seeing the final result.
+    """
+    t_total = time.monotonic()
+    collection = get_session_collection(session_id)
+    if collection is None:
+        yield "error", {"detail": "No document uploaded yet for this session"}
+        return
+
+    cache_key = (session_id, query.strip().lower())
+    cached = _response_cache.get(cache_key)
+    if cached is not None:
+        yield "cached", {**cached, "total_elapsed_ms": _elapsed_ms(t_total)}
+        return
+
+    t = time.monotonic()
+    chunks = make_retriever(collection)(query)
+    yield "retrieval", {"chunk_count": len(chunks), "elapsed_ms": _elapsed_ms(t)}
+
+    t = time.monotonic()
+    relevance = filter_relevant_chunks(
+        query, chunks, _guard.model, threshold=_guard.relevance_threshold
+    )
+    kept_chunks = [r.chunk for r in relevance if r.kept]
+    yield "relevance", {"relevance": _serialize_relevance(relevance), "elapsed_ms": _elapsed_ms(t)}
+
+    t = time.monotonic()
+    sufficiency = check_sufficiency(
+        query, kept_chunks, _guard.model, threshold=_guard.sufficiency_threshold
+    )
+    yield "sufficiency", {"sufficiency": asdict(sufficiency), "elapsed_ms": _elapsed_ms(t)}
+
+    if not sufficiency.sufficient:
+        report = {
+            "query": query,
+            "action": "insufficient_context",
+            "answer": _guard.insufficient_context_message,
+            "relevance": _serialize_relevance(relevance),
+            "sufficiency": asdict(sufficiency),
+            "grounding": None,
+            "metrics": {"decision_calls": len(relevance) + 1, "generation_usage": None},
+        }
+        _response_cache[cache_key] = report
+        yield "done", {"report": report, "total_elapsed_ms": _elapsed_ms(t_total)}
+        return
+
+    usage_sink: dict = {}
+    t = time.monotonic()
+    generate_fn = _make_upload_generate_fn(usage_sink=usage_sink)
+    answer = generate_fn(query, kept_chunks)
+    yield "generation", {"answer": answer, "usage": usage_sink, "elapsed_ms": _elapsed_ms(t)}
+
+    grounding = None
+    decision_calls = len(relevance) + 1
+    if _guard.check_grounding_enabled:
+        t = time.monotonic()
+        grounding = check_grounding(
+            answer,
+            kept_chunks,
+            _guard.model,
+            threshold=_guard.grounding_threshold,
+            min_coverage=_guard.grounding_min_coverage,
+        )
+        decision_calls += len(grounding.claims)
+        yield "grounding", {
+            "grounding": _serialize_grounding(grounding),
+            "elapsed_ms": _elapsed_ms(t),
+        }
+        action = "answered" if grounding.grounded else "ungrounded_answer_flagged"
+    else:
+        action = "answered"
+
+    report = {
+        "query": query,
+        "action": action,
+        "answer": answer,
+        "relevance": _serialize_relevance(relevance),
+        "sufficiency": asdict(sufficiency),
+        "grounding": _serialize_grounding(grounding),
+        "metrics": {"decision_calls": decision_calls, "generation_usage": usage_sink or None},
+    }
+    _response_cache[cache_key] = report
+    yield "done", {"report": report, "total_elapsed_ms": _elapsed_ms(t_total)}
 
 
 @app.get("/api/info")
@@ -144,7 +255,12 @@ async def upload(
         raise HTTPException(400, "No extractable text found in that file")
 
     replace_session_document(x_session_id, file.filename or "upload", chunks)
-    meta = {"filename": file.filename, "chunk_count": len(chunks)}
+
+    # A new document invalidates any cached answers from the previous one.
+    for key in [k for k in _response_cache if k[0] == x_session_id]:
+        del _response_cache[key]
+
+    meta = {"filename": file.filename, "chunk_count": len(chunks), "chunks": chunks}
     _session_meta[x_session_id] = meta
     return meta
 
@@ -155,13 +271,27 @@ def chat(request: ChatRequest, x_session_id: str = Header(..., alias="X-Session-
     if not query:
         return {"error": "empty query"}
 
-    collection = get_session_collection(x_session_id)
-    if collection is None:
-        raise HTTPException(400, "No document uploaded yet for this session")
+    event, data = None, None
+    for event, data in _run_pipeline(query, x_session_id):
+        pass  # drain to the final event; intermediate stages are for /stream only
 
-    chunks = make_retriever(collection)(query)
-    report = _guard.run(query, chunks, _upload_generate_fn)
-    return _serialize_report(report)
+    if event == "error":
+        raise HTTPException(400, data["detail"])
+    return data.get("report", data)
+
+
+@app.post("/api/chat/stream")
+def chat_stream(request: ChatRequest, x_session_id: str = Header(..., alias="X-Session-Id")):
+    query = request.query.strip()
+
+    def sse():
+        if not query:
+            yield f"event: error\ndata: {json.dumps({'detail': 'empty query'})}\n\n"
+            return
+        for event, data in _run_pipeline(query, x_session_id):
+            yield f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+    return StreamingResponse(sse(), media_type="text/event-stream")
 
 
 app.mount("/static", StaticFiles(directory="static"), name="static")

@@ -43,13 +43,20 @@
     <div class="chat-view" id="view-chat" hidden>
       <div class="doc-bar">
         <span class="doc-chip" id="doc-chip"></span>
-        <button type="button" class="doc-change-btn" id="doc-change-btn">Upload a different document</button>
+        <div class="doc-bar-actions">
+          <button type="button" class="doc-link-btn" id="chunks-toggle">View chunks</button>
+          <button type="button" class="doc-change-btn" id="doc-change-btn">Upload a different document</button>
+        </div>
       </div>
+
+      <div class="chunks-panel" id="chunks-panel" hidden></div>
+
+      <div class="metrics-strip" id="metrics-strip" hidden></div>
 
       <main class="chat" id="chat">
         <div class="intro" id="intro-chat">
           <p>Ask something about the document you uploaded.</p>
-          <p class="intro-hint">Every answer includes a reasoning trace -- click <strong>Why this answer?</strong> to see it.</p>
+          <p class="intro-hint">Watch the pipeline run live -- retrieval, relevance, sufficiency, generation, and grounding, each with real timing and token counts.</p>
         </div>
       </main>
 
@@ -69,12 +76,13 @@
 
   <template id="message-template">
     <div class="msg msg-assistant">
+      <div class="stepper"></div>
       <div class="msg-bubble">
         <div class="action-badge"></div>
         <div class="msg-text"></div>
       </div>
       <button class="trace-toggle" type="button">
-        <span class="chevron">›</span> Why this answer?
+        <span class="chevron">›</span> Full reasoning trace
       </button>
       <div class="trace-panel"></div>
     </div>
