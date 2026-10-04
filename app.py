@@ -794,5 +794,10 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
 @app.get("/")
+def landing() -> FileResponse:
+    return FileResponse("static/landing.html")
+
+
+@app.get("/app")
 def index() -> FileResponse:
     return FileResponse("static/index.html")
