@@ -28,7 +28,12 @@ from rag_guard.pipeline import GenerateFn
 load_dotenv()
 
 COLLECTION_NAME = "nimbus_docs"
-TOP_K = 4
+# Broad/summary-style questions ("what is this about?") need coverage across
+# more of the document than a narrow factual lookup does -- 4 was tuned for
+# short, focused corpora (the Nimbus demo docs) and was too thin a slice for
+# longer uploaded documents (e.g. a 37-chunk paper), where 4/37 chunks often
+# didn't include enough of the document for sufficiency to fairly judge it.
+TOP_K = 8
 UPLOAD_COLLECTION_PREFIX = "session_"
 
 SYSTEM_PROMPT = (
@@ -295,7 +300,12 @@ def setup():
     decision_backend, model = make_decision_model(fallback_model)
     collection = build_vector_store()
     retrieve = make_retriever(collection)
-    guard = RagGuard(model=model)
+    # Lower sufficiency_threshold than RagGuard's 0.6 default: the intent
+    # for this app is to let generation run more often and rely on the
+    # grounding check (strict defaults, untouched) to catch an answer that
+    # overreaches, rather than relying on sufficiency to pre-empt every
+    # borderline case before generation ever gets a chance to run.
+    guard = RagGuard(model=model, sufficiency_threshold=0.45)
     backend_info = {
         "generate_fn": client_backend,
         "generate_model": GENERATE_MODEL_NAMES[client_backend],

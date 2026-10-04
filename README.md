@@ -156,6 +156,34 @@ into the page (`static/app.js`'s `escapeHtml()`) -- chunk ids are derived
 from the uploaded filename, which is attacker-controllable, so this isn't
 optional hardening.
 
+### Two different points where a bad answer gets caught
+
+rag-guard can stop a hallucinated answer in two different places, and
+they're not interchangeable:
+
+- **Sufficiency** (before generation) -- the decision model looks at the
+  retrieved chunks and decides whether to let the LLM answer *at all*. A
+  "no" here means the LLM never runs; you get `insufficient_context` and
+  never see what it would have said.
+- **Grounding** (after generation) -- the LLM already answered, and the
+  decision model checks each claim in that answer against the retrieved
+  chunks. An unsupported claim means `ungrounded_answer_flagged` -- you
+  still see the answer, just visibly marked as not fully backed by the
+  document.
+
+`TOP_K` (`pipeline_setup.py`, 8 chunks per query) and `sufficiency_threshold`
+(0.45, lower than rag-guard's 0.6 default) are both tuned toward the second
+behavior on purpose: let generation run more often, and lean on grounding
+-- not sufficiency -- as the primary catch. A stricter sufficiency gate is
+more defensible in an unattended production pipeline (it never pays for a
+generation call it doesn't need), but this app exists partly to *show*
+rag-guard's checks working, and a hard sufficiency block before generation
+never runs means you never see grounding do anything. 4 was tuned against
+the short, narrow Nimbus demo corpus and turned out too thin a slice for a
+longer, broader uploaded document -- a summary-style question ("what is
+this document about?") against a 30+ chunk document needs more than 4
+chunks of coverage to be fairly judged as sufficient or not.
+
 The LLM/decision-model backend selection happens once at process startup
 (`pipeline_setup.setup()`), not per-request; per-session document
 metadata (filename, chunk count) is an in-memory dict in `app.py` that
