@@ -59,6 +59,7 @@ import json
 import logging
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, replace
 
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile
@@ -68,8 +69,11 @@ from pydantic import BaseModel
 
 from pipeline_logging import stage_log
 from pipeline_setup import (
+    EMBEDDING_PROVIDERS,
     chunk_text,
+    ensure_compare_collections,
     extract_text,
+    get_compare_collection,
     get_session_collection,
     make_retriever,
     remove_session_document,
@@ -84,7 +88,7 @@ from rag_guard.intent import check_intent
 from rag_guard.pipeline import PARTIAL_CONTEXT_INSTRUCTION
 from rag_guard.relevance import filter_relevant_chunks, rerank_kept_chunks
 from rag_guard.sufficiency import check_sufficiency
-from rag_guard.types import CaveatResult
+from rag_guard.types import CaveatResult, RelevanceResult
 
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024  # 5 MB -- generous for text/markdown/small PDFs
 
@@ -185,6 +189,25 @@ def _serialize_grounding(grounding) -> dict | None:
     }
 
 
+def _serialize_guard_report(report) -> dict:
+    """Same shape `_run_pipeline`'s final report dict uses, built from a
+    `GuardReport` returned by `RagGuard.run()` directly -- used by compare
+    mode, which calls `guard.run()` once per embedding provider instead of
+    replaying it stage-by-stage (no SSE streaming needed for a side-by-side
+    comparison view).
+    """
+    return {
+        "action": report.action,
+        "answer": report.answer,
+        "relevance": _serialize_relevance(report.relevance),
+        "sufficiency": asdict(report.sufficiency) if report.sufficiency else None,
+        "grounding": _serialize_grounding(report.grounding),
+        "intent": asdict(report.intent) if report.intent else None,
+        "clarify": asdict(report.clarify) if report.clarify else None,
+        "caveat": asdict(report.caveat) if report.caveat else None,
+    }
+
+
 def _run_pipeline(query: str, session_id: str):
     """Generator yielding (event_name, data) as each real pipeline stage completes.
 
@@ -265,21 +288,39 @@ def _run_pipeline(query: str, session_id: str):
     # usually the single most useful chunk for exactly that kind of
     # question -- anchor it in unconditionally rather than leaving it to
     # chance, same as a human skimming a document would start at the top.
+    #
+    # ANCHOR_CHUNK_COUNT=2, not 1: on a real academic PDF (verified against
+    # "Attention Is All You Need"), the abstract -- and with it the paper's
+    # actual contribution statement -- routinely straddles the boundary
+    # between the first two chunks: chunk 0 is diluted by a full author/
+    # affiliation list before the abstract even starts, and chunk 1 (where
+    # the contribution sentence and headline results actually land) opens
+    # mid-sentence with no topical framing of its own. Neither chromadb's
+    # default embedding nor OpenAI's text-embedding-3-small ranked that
+    # second chunk in the top 12 for "what is the main contribution of this
+    # paper?" -- a single-chunk anchor silently missed exactly the content
+    # it exists to guarantee.
+    ANCHOR_CHUNK_COUNT = 2
     meta = _session_meta.get(session_id)
-    anchor_added = False
-    if meta and meta.get("chunks") and not any(c.id.endswith("-0") for c in chunks):
-        anchor = Chunk(
-            id=f"{meta['filename']}-0", text=meta["chunks"][0], metadata={"anchor": True}
-        )
-        chunks = [anchor, *chunks]
-        anchor_added = True
+    anchor_ids: list[str] = []
+    if meta and meta.get("chunks"):
+        doc_chunks = meta["chunks"]
+        present_ids = {c.id for c in chunks}
+        for i in range(min(ANCHOR_CHUNK_COUNT, len(doc_chunks))):
+            anchor_id = f"{meta['filename']}-{i}"
+            if anchor_id not in present_ids:
+                chunks = [
+                    Chunk(id=anchor_id, text=doc_chunks[i], metadata={"anchor": True}),
+                    *chunks,
+                ]
+                anchor_ids.append(anchor_id)
 
     elapsed = _elapsed_ms(t)
     stage_log(
         session_id,
         "retrieval",
         f"{len(chunks)} chunks fetched ({elapsed}ms)"
-        + (" [+anchor: doc opening chunk]" if anchor_added else ""),
+        + (f" [+anchor: {len(anchor_ids)} doc opening chunk(s)]" if anchor_ids else ""),
     )
     yield "retrieval", {"chunk_count": len(chunks), "elapsed_ms": elapsed}
 
@@ -288,40 +329,89 @@ def _run_pipeline(query: str, session_id: str):
         retrieval_query, chunks, _guard.model, threshold=_guard.relevance_threshold
     )
 
-    if anchor_added:
-        # The anchor was force-added to the retrieval pool specifically so
-        # broad "what is this document" questions have the opening chunk
-        # available -- but the relevance filter judges it by the same
-        # lexical/semantic bar as any other chunk, and a title/cover page
+    if anchor_ids:
+        # Anchors were force-added to the retrieval pool specifically so
+        # broad "what is this document" questions have the opening chunks
+        # available -- but the relevance filter judges them by the same
+        # lexical/semantic bar as any other chunk, and an opening chunk
         # routinely scores low against a query that doesn't happen to share
-        # its wording (e.g. "what's its purpose?" vs. an announcement title
-        # with no literal "purpose"). Scoring the anchor is still useful
-        # signal for the trace view, but dropping it here defeats the
-        # entire point of anchoring it: it never reaches
-        # sufficiency/generation at all.
-        anchor_id = f"{meta['filename']}-0"
-        anchor_result = next((r for r in relevance if r.chunk.id == anchor_id), None)
-        if anchor_result is not None and not anchor_result.kept:
-            stage_log(
-                session_id,
-                "relevance",
-                f"  [FORCE-KEEP] anchor chunk scored p={anchor_result.probability:.2f} "
-                f"(below threshold) but is kept anyway -- it's the doc's opening chunk",
-            )
+        # its wording. Scoring them is still useful signal for the trace
+        # view, but dropping them here defeats the entire point of
+        # anchoring: they'd never reach sufficiency/generation at all.
+        anchor_id_set = set(anchor_ids)
+        for r in relevance:
+            if r.chunk.id in anchor_id_set and not r.kept:
+                stage_log(
+                    session_id,
+                    "relevance",
+                    f"  [FORCE-KEEP] anchor chunk {r.chunk.id} scored p={r.probability:.2f} "
+                    f"(below threshold) but is kept anyway -- it's one of the doc's opening chunks",
+                )
         relevance = [
-            replace(r, kept=True) if r.chunk.id == anchor_id and not r.kept else r
+            replace(r, kept=True) if r.chunk.id in anchor_id_set and not r.kept else r
             for r in relevance
         ]
 
+    # Captured before neighbor expansion below adds synthetic entries that
+    # never actually called the decision model -- len(relevance) after that
+    # point would overcount real relevance decision calls.
+    relevance_decision_calls = len(relevance)
+
+    # Neighbor expansion: a chunk that scores strongly but ends mid-section
+    # (verified against a real 229-chunk paper: a chunk titled "...4 OPEN
+    # PROBLEMS" scored 0.91 and was kept, but the actual open-problems
+    # content lived entirely in the *next* chunk, which was never even a
+    # retrieval candidate in a 229-chunk document) is a reliable signal
+    # that its immediate successor continues the same relevant content --
+    # chunking is unaware of section boundaries, so content routinely spills
+    # across a chunk split with no shared vocabulary for similarity search
+    # to catch on its own. Pull that neighbor in directly, inheriting the
+    # strong chunk's relevance rather than spending another decision call
+    # scoring it independently.
+    NEIGHBOR_EXPANSION_THRESHOLD = 0.7
+    if meta and meta.get("chunks"):
+        doc_chunks = meta["chunks"]
+        filename = meta["filename"]
+        existing_ids = {r.chunk.id for r in relevance}
+        neighbor_additions = []
+        for r in relevance:
+            if not r.kept or r.probability < NEIGHBOR_EXPANSION_THRESHOLD:
+                continue
+            try:
+                idx = int(r.chunk.id.rsplit("-", 1)[-1])
+            except ValueError:
+                continue
+            next_id = f"{filename}-{idx + 1}"
+            if idx + 1 < len(doc_chunks) and next_id not in existing_ids:
+                neighbor_additions.append(
+                    RelevanceResult(
+                        chunk=Chunk(
+                            id=next_id, text=doc_chunks[idx + 1], metadata={"neighbor_of": r.chunk.id}
+                        ),
+                        probability=r.probability,
+                        kept=True,
+                    )
+                )
+                existing_ids.add(next_id)
+        if neighbor_additions:
+            stage_log(
+                session_id,
+                "relevance",
+                f"  [NEIGHBOR-EXPAND] +{len(neighbor_additions)} chunk(s) immediately "
+                f"following a strong match (p>={NEIGHBOR_EXPANSION_THRESHOLD}), in case "
+                f"relevant content continues across the chunk boundary",
+            )
+            relevance = relevance + neighbor_additions
+
     if _guard.rerank_by_relevance:
         kept_chunks = rerank_kept_chunks(relevance)
-        if anchor_added:
-            # Reranking by probability alone would bury the anchor -- it's
-            # force-kept precisely because its own score is unreliable for
-            # broad queries, so pin it first rather than let a low score
-            # sort it to the back.
-            anchor_id = f"{meta['filename']}-0"
-            kept_chunks.sort(key=lambda c: c.id != anchor_id)
+        if anchor_ids:
+            # Reranking by probability alone would bury the anchors -- they're
+            # force-kept precisely because their own scores are unreliable
+            # for broad queries, so pin them first (in document order) rather
+            # than let a low score sort them to the back.
+            anchor_order = {aid: i for i, aid in enumerate(anchor_ids)}
+            kept_chunks.sort(key=lambda c: anchor_order.get(c.id, len(anchor_order)))
     else:
         kept_chunks = [r.chunk for r in relevance if r.kept]
     elapsed = _elapsed_ms(t)
@@ -377,7 +467,7 @@ def _run_pipeline(query: str, session_id: str):
                 "sufficiency": None,
                 "grounding": None,
                 "clarify": asdict(clarify),
-                "metrics": {"decision_calls": len(relevance) + 2, "generation_usage": None},
+                "metrics": {"decision_calls": relevance_decision_calls + 2, "generation_usage": None},
             }
             _response_cache[cache_key] = report
             _remember_turn(session_id, query, question)
@@ -419,7 +509,7 @@ def _run_pipeline(query: str, session_id: str):
             "relevance": _serialize_relevance(relevance),
             "sufficiency": asdict(sufficiency),
             "grounding": None,
-            "metrics": {"decision_calls": len(relevance) + 1, "generation_usage": None},
+            "metrics": {"decision_calls": relevance_decision_calls + 1, "generation_usage": None},
         }
         _response_cache[cache_key] = report
         _remember_turn(session_id, query, report["answer"])
@@ -456,7 +546,7 @@ def _run_pipeline(query: str, session_id: str):
     yield "generation", {"answer": answer, "usage": usage_sink, "elapsed_ms": elapsed}
 
     grounding = None
-    decision_calls = len(relevance) + 1
+    decision_calls = relevance_decision_calls + 1
     if _guard.check_grounding_enabled:
         t = time.monotonic()
         grounding = check_grounding(
@@ -622,6 +712,66 @@ def chat(request: ChatRequest, x_session_id: str = Header(..., alias="X-Session-
     if event == "error":
         raise HTTPException(400, data["detail"])
     return data.get("report", data)
+
+
+def _run_compare_for_provider(query: str, session_id: str, provider: str) -> dict:
+    """One provider's leg of compare mode: retrieve from that provider's own
+    embedding collection, then run both an unprotected baseline (`raw`) and
+    the real JEV pipeline (`jev`) against the exact same retrieved chunks --
+    same generation model and JEV thresholds as single-provider mode
+    (`_guard`, `_make_upload_generate_fn`), only the embedding varies. This
+    is the whole point of compare mode: isolating what a weaker/stronger
+    embedding does to JEV's catch rate, not comparing generation models.
+    """
+    collection = get_compare_collection(session_id, provider)
+    chunks = make_retriever(collection)(query)
+
+    raw_usage: dict = {}
+    raw_answer = _make_upload_generate_fn(usage_sink=raw_usage)(query, chunks)
+
+    jev_usage: dict = {}
+    jev_report = _guard.run(query, chunks, _make_upload_generate_fn(usage_sink=jev_usage))
+
+    return {
+        "provider": provider,
+        "provider_name": EMBEDDING_PROVIDERS[provider],
+        "chunk_count": len(chunks),
+        "raw": {"answer": raw_answer, "usage": raw_usage},
+        "jev": {**_serialize_guard_report(jev_report), "usage": jev_usage},
+    }
+
+
+@app.post("/api/compare")
+def compare(request: ChatRequest, x_session_id: str = Header(..., alias="X-Session-Id")) -> dict:
+    """Compare-mode: the same question run through every embedding provider
+    in EMBEDDING_PROVIDERS, in parallel, each with a raw (JEV-off) answer
+    and a JEV-protected one side by side. See _run_compare_for_provider.
+    """
+    x_session_id = _check_session_id(x_session_id)
+    _check_rate_limit(x_session_id)
+    query = request.query.strip()
+    if not query:
+        raise HTTPException(400, "empty query")
+
+    meta = _session_meta.get(x_session_id)
+    if meta is None or get_session_collection(x_session_id) is None:
+        raise HTTPException(400, "No document uploaded yet for this session")
+
+    t_total = time.monotonic()
+    ensure_compare_collections(x_session_id, meta["filename"], meta["chunks"])
+    stage_log(x_session_id, "compare", f'"{query}" across {list(EMBEDDING_PROVIDERS)}')
+
+    with ThreadPoolExecutor(max_workers=len(EMBEDDING_PROVIDERS)) as pool:
+        results = list(
+            pool.map(
+                lambda provider: _run_compare_for_provider(query, x_session_id, provider),
+                EMBEDDING_PROVIDERS,
+            )
+        )
+
+    total = _elapsed_ms(t_total)
+    stage_log(x_session_id, "compare", f"done in {total}ms")
+    return {"query": query, "total_elapsed_ms": total, "providers": results}
 
 
 @app.post("/api/chat/stream")

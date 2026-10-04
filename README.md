@@ -11,7 +11,8 @@ and grounding checks comes from rag-guard.
 
 ## What's here
 
-Two separate entry points, sharing the same pipeline wiring:
+Two separate entry points, sharing the same pipeline wiring, plus the
+shared setup/logging modules and dev-only evaluation tooling:
 
 - **`app.py` + `static/` -- the web app.** Upload your own document
   (`.txt` / `.md` / `.pdf`) and chat against it. There is no built-in demo
@@ -32,12 +33,22 @@ Two separate entry points, sharing the same pipeline wiring:
   developer tool, not part of the product -- if you just want to try the
   app, use the web UI.
 - **`pipeline_setup.py`** -- shared setup (Chroma client, chunking, file
-  text extraction, backend selection) both entry points build on, so they
-  can't drift apart on how retrieval or generation works.
+  text extraction, backend selection, embedding provider selection) both
+  entry points build on, so they can't drift apart on how retrieval or
+  generation works.
 - **`pipeline_logging.py`** -- structured per-stage console logging for
   `app.py` (see "Server-side logging" below) -- what actually went in and
   out of rag-guard and the LLM, independent of what any one browser
   session's UI shows.
+- **`eval_rag_guard.py` / `eval_multi_embedding.py`** -- golden-set
+  evaluation scripts, not part of the running app. `eval_rag_guard.py`
+  runs a hand-built set of query/expected-decision cases (transcribed from
+  real test documents in `test_pdf/`) against the real pipeline and
+  reports recall@k and pass rate per case group. `eval_multi_embedding.py`
+  reruns the same golden set through OpenAI's and Gemini's embeddings in
+  parallel to check whether rag-guard reaches the same decision regardless
+  of which provider's retrieval fed it -- see "Embedding provider
+  comparison" below.
 
 ## Setup
 
@@ -48,6 +59,8 @@ pip install -r requirements.txt
 
 cp .env.example .env
 # fill in OPENAI_API_KEY or ANTHROPIC_API_KEY, and optionally TYPESAFE_API_KEY
+# GOOGLE_API_KEY additionally enables Gemini as an embedding provider and
+# is required for Compare mode (see "Embedding provider comparison" below)
 
 uvicorn app:app --reload   # web app at http://127.0.0.1:8000
 # or
@@ -120,6 +133,9 @@ answer is only ever valid for the document it was computed against.
   `grounding`, each with `elapsed_ms`) as it actually completes, then a
   final `done` event with the full report -- or a single `cached` event
   on a cache hit. This is what the web UI uses.
+- `POST /api/compare` -- `{"query": "..."}` in, both providers' raw +
+  JEV-protected results out (see "Embedding provider comparison" below).
+  Blocks until both providers finish running in parallel.
 
 ### Session isolation
 
@@ -175,24 +191,80 @@ they're not interchangeable:
   still see the answer, just visibly marked as not fully backed by the
   document.
 
-`TOP_K` (`pipeline_setup.py`, 8 chunks per query) and `sufficiency_threshold`
-(0.45, lower than rag-guard's 0.6 default) are both tuned toward the second
-behavior on purpose: let generation run more often, and lean on grounding
--- not sufficiency -- as the primary catch. A stricter sufficiency gate is
-more defensible in an unattended production pipeline (it never pays for a
-generation call it doesn't need), but this app exists partly to *show*
-rag-guard's checks working, and a hard sufficiency block before generation
-never runs means you never see grounding do anything. 4 was tuned against
-the short, narrow Nimbus demo corpus and turned out too thin a slice for a
-longer, broader uploaded document -- a summary-style question ("what is
-this document about?") against a 30+ chunk document needs more than 4
-chunks of coverage to be fairly judged as sufficient or not.
+`TOP_K` (`pipeline_setup.py`, 12 chunks per query by default) and
+`sufficiency_threshold` (0.45, lower than rag-guard's 0.6 default) are both
+tuned toward the second behavior on purpose: let generation run more
+often, and lean on grounding -- not sufficiency -- as the primary catch. A
+stricter sufficiency gate is more defensible in an unattended production
+pipeline (it never pays for a generation call it doesn't need), but this
+app exists partly to *show* rag-guard's checks working, and a hard
+sufficiency block before generation never runs means you never see
+grounding do anything.
+
+`TOP_K` itself scales with document size (`_effective_top_k`):
+`max(TOP_K, round(chunk_count * 0.08))`, capped at 30. A fixed `TOP_K=12`
+means a 250-chunk document only ever offers ~5% of itself as retrieval
+candidates per query -- not enough for broad questions ("what datasets does
+this survey use?") that are legitimately answered by content spread across
+many chunks. The cap exists so relevance-check cost (one decision-model
+call per candidate chunk) doesn't grow unbounded on very large documents.
+
+Retrieval also widens past the raw top-k result in two targeted ways:
+up to the first 2 chunks of the document are force-kept as candidates even
+if they don't naturally score high enough (`ANCHOR_CHUNK_COUNT` in
+`app.py`) -- real documents often open with dense author/affiliation text
+that dilutes the embedding of the sentence actually stating the paper's
+contribution, which otherwise never surfaces in the top-k at all. And any
+kept chunk scoring above 0.7 pulls in the next chunk immediately after it
+(`NEIGHBOR_EXPANSION_THRESHOLD`) -- chunking is blind to section
+boundaries, so a high-scoring chunk cut off mid-heading
+("...4 OPEN PROBLEMS") otherwise leaves its actual content in the very
+next chunk, which was never a retrieval candidate at all.
 
 The LLM/decision-model backend selection happens once at process startup
 (`pipeline_setup.setup()`), not per-request; per-session document
 metadata (filename, chunk count) is an in-memory dict in `app.py` that
 mirrors the in-memory Chroma client it describes -- both reset on process
 restart, which is fine for this scope (see "Known limitations" below).
+
+### Embedding provider comparison ("Compare" mode)
+
+The chat view has a **Single provider / Compare (2)** mode toggle. Compare
+mode runs the exact same query through two complete, independent
+pipelines that differ in exactly one variable -- which embedding provider
+produced the retrieval candidates (OpenAI `text-embedding-3-small` vs.
+Google `gemini-embedding-001`) -- while generation model, rag-guard
+thresholds, and chunk boundaries are held constant. For each provider it
+shows both the raw answer (JEV off, context handed straight to the LLM)
+and the JEV-protected answer with its full reasoning trace, side by side,
+plus a summary table of each provider's final decision, grounding
+coverage, and sufficiency probability. The point is to make retrieval
+quality differences visible, not just assert them -- e.g. a broad
+"what's this paper's main contribution?" query can come back fully
+grounded under one provider's embedding and flagged `ungrounded_answer_flagged`
+under the other's, on the same document, same chunks, same thresholds.
+
+`POST /api/compare` (`{"query": "..."}`) is the backing endpoint. The two
+providers' comparison collections are built lazily, the first time a
+session opens compare mode (not on every upload -- most sessions never
+use it, and building both costs two full embedding API passes over the
+document for nothing if they're never needed), and in parallel rather
+than one after another so a large document's first comparison doesn't pay
+for both providers' embedding time twice over. Retrieval and the two full
+`RagGuard.run()` passes also run in parallel (`ThreadPoolExecutor`), one
+thread per provider.
+
+Two real provider-specific constraints showed up building this and are
+handled in `pipeline_setup.py`: Gemini's `embedContent` batch endpoint
+rejects more than 100 inputs per call (`_add_chunks_in_batches` chunks any
+`collection.add()` into batches of 90), and its free tier separately
+rate-limits embedding requests per minute (generic retry with backoff,
+since chromadb wraps every provider's error as a plain `ValueError` with
+no typed "retryable" distinction). A per-session lock around building the
+comparison collections also prevents two `/api/compare` calls racing on
+the same session from each deciding the other's in-progress collection
+"doesn't exist yet," deleting it, and crashing the other's in-flight
+`collection.add()` call.
 
 ### Server-side logging
 

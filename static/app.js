@@ -16,6 +16,15 @@ const chunksPanelEl = document.getElementById("chunks-panel");
 const metricsStripEl = document.getElementById("metrics-strip");
 const activityLogEl = document.getElementById("activity-log");
 const sideStepperEl = document.getElementById("side-stepper");
+const modeToggleEl = document.getElementById("mode-toggle");
+const singleProviderViewEl = document.getElementById("single-provider-view");
+const compareViewEl = document.getElementById("compare-view");
+const compareIntroEl = document.getElementById("compare-intro");
+const compareColumnsEl = document.getElementById("compare-columns");
+const compareSummaryEl = document.getElementById("compare-summary");
+const compareComposer = document.getElementById("compare-composer");
+const compareInput = document.getElementById("compare-query-input");
+const compareSendBtn = document.getElementById("compare-send-btn");
 
 let thresholds = {
   relevance_threshold: 0.5,
@@ -145,8 +154,25 @@ function showChatView(filename, chunkCount, chunks) {
   renderChunksPanel(chunks || []);
   renderMetricsStrip();
   renderSideStepperIdle();
+  setMode("single");
   input.focus();
 }
+
+/* --- Mode toggle (single provider / compare) --------------------------------- */
+
+function setMode(mode) {
+  modeToggleEl.querySelectorAll(".mode-btn").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.mode === mode);
+  });
+  singleProviderViewEl.hidden = mode !== "single";
+  compareViewEl.hidden = mode !== "compare";
+  if (mode === "compare") compareInput.focus();
+}
+
+modeToggleEl.addEventListener("click", (e) => {
+  const btn = e.target.closest(".mode-btn");
+  if (btn) setMode(btn.dataset.mode);
+});
 
 async function checkExistingDocument() {
   try {
@@ -689,6 +715,103 @@ composer.addEventListener("submit", (e) => {
   const q = input.value.trim();
   if (!q) return;
   sendQuery(q);
+});
+
+/* --- Compare mode: same question, one column per embedding provider,  --------
+   raw (JEV-off) vs JEV-protected answer in each -- see /api/compare. */
+
+function renderCompareColumn(colEl, data) {
+  const jev = data.jev;
+  colEl.innerHTML = `
+    <div class="compare-col-header">
+      <span class="compare-provider-name">${escapeHtml(data.provider_name)}</span>
+      <span class="compare-chunk-count">${data.chunk_count} chunks retrieved</span>
+    </div>
+    <div class="compare-card compare-card-raw">
+      <div class="compare-card-label">Raw answer <span class="compare-card-sublabel">— JEV off</span></div>
+      <div class="compare-card-text"></div>
+    </div>
+    <div class="compare-arrow">↓ same retrieval, now guarded by JEV ↓</div>
+    <div class="compare-card compare-card-jev">
+      <div class="compare-card-label-row">
+        <span class="compare-card-label">JEV-protected answer</span>
+        <span class="action-badge show ${jev.action}">${escapeHtml(ACTION_LABELS[jev.action] || jev.action)}</span>
+      </div>
+      <div class="compare-card-text"></div>
+      <button class="trace-toggle" type="button"><span class="chevron">›</span> Full reasoning trace</button>
+      <div class="trace-panel"></div>
+    </div>
+  `;
+  colEl.querySelector(".compare-card-raw .compare-card-text").textContent = data.raw.answer;
+  colEl.querySelector(".compare-card-jev .compare-card-text").textContent = jev.answer;
+  // renderTracePanel() only needs a container with a .trace-panel and a
+  // .trace-toggle child -- the same function single-provider mode uses.
+  renderTracePanel(colEl.querySelector(".compare-card-jev"), jev);
+}
+
+function renderCompareSummary(providers) {
+  const rows = providers
+    .map((p) => {
+      const jev = p.jev;
+      const coverage = jev.grounding ? pct(jev.grounding.coverage) : "—";
+      const suffP = jev.sufficiency ? jev.sufficiency.probability.toFixed(2) : "—";
+      return `
+        <tr>
+          <td>${escapeHtml(p.provider_name)}</td>
+          <td><span class="action-badge show ${jev.action}">${escapeHtml(ACTION_LABELS[jev.action] || jev.action)}</span></td>
+          <td>${coverage}</td>
+          <td>${suffP}</td>
+        </tr>`;
+    })
+    .join("");
+  compareSummaryEl.innerHTML = `
+    <table class="compare-summary-table">
+      <thead>
+        <tr><th>Provider</th><th>JEV decision</th><th>Grounding coverage</th><th>Sufficiency p</th></tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>
+  `;
+}
+
+async function runCompare(query) {
+  compareInput.value = "";
+  compareSendBtn.disabled = true;
+  compareIntroEl.hidden = true;
+  compareColumnsEl.innerHTML = `<div class="compare-loading"><span class="dots">Running both providers in parallel — two full retrieval + JEV passes, slower than a single query. First comparison on a large document also builds its per-provider index, which can take a while.</span></div>`;
+  compareSummaryEl.innerHTML = "";
+
+  try {
+    const res = await fetch("/api/compare", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Session-Id": sessionId },
+      body: JSON.stringify({ query }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      compareColumnsEl.innerHTML = `<div class="compare-error">${escapeHtml(data.detail || "Request failed.")}</div>`;
+      return;
+    }
+    compareColumnsEl.innerHTML = "";
+    data.providers.forEach((p) => {
+      const col = document.createElement("div");
+      col.className = "compare-col";
+      compareColumnsEl.appendChild(col);
+      renderCompareColumn(col, p);
+    });
+    renderCompareSummary(data.providers);
+  } catch (e) {
+    compareColumnsEl.innerHTML = `<div class="compare-error">Something went wrong talking to the backend.</div>`;
+  } finally {
+    compareSendBtn.disabled = false;
+  }
+}
+
+compareComposer.addEventListener("submit", (e) => {
+  e.preventDefault();
+  const q = compareInput.value.trim();
+  if (!q) return;
+  runCompare(q);
 });
 
 checkExistingDocument();

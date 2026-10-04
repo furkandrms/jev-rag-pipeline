@@ -2,10 +2,17 @@
 # the whole point of this repo is to exercise the real `pip install` path.
 # Pin to the exact commit used when this repo was last verified working;
 # bump it deliberately when re-testing against a newer rag-guard.
-rag-guard[typesafe,openai] @ git+https://github.com/furkandrms/jev-rag-guard.git@bf5f291
+rag-guard[typesafe,openai] @ git+https://github.com/furkandrms/jev-rag-guard.git@bf94524
 
 chromadb>=0.5
 python-dotenv>=1.0
+
+# multi-embedding comparison (eval_multi_embedding.py) -- OpenAI's embedding
+# API is reached through the `openai` package chromadb already depends on;
+# Gemini needs this SDK explicitly. Anthropic has no embeddings endpoint of
+# its own (see eval_multi_embedding.py's module docstring), so there's no
+# equivalent package for it here.
+google-genai>=1.0
 
 # web UI (app.py)
 fastapi>=0.110

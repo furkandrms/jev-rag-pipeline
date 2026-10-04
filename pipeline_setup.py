@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 from dotenv import load_dotenv
 
@@ -50,12 +53,18 @@ SYSTEM_PROMPT = (
 UPLOAD_SYSTEM_PROMPT = (
     "Answer the question using only the context below, which comes from a "
     "document the user uploaded. If the context doesn't contain the "
-    "answer, say so plainly -- do not guess."
+    "answer, say so plainly -- do not guess. If the context gives more than "
+    "one number or value for what the question asks (e.g. results for "
+    "different model variants, configurations, or conditions), do not pick "
+    "one silently -- name which variant/configuration each number belongs "
+    "to, or ask which one the user means if that's not already clear from "
+    "the question."
 )
 
 GENERATE_MODEL_NAMES = {"openai": "gpt-4o-mini", "anthropic": "claude-haiku-4-5"}
 
 _chroma_client = None
+_embedding_function = None
 
 
 def get_chroma_client():
@@ -74,12 +83,121 @@ def get_chroma_client():
     return _chroma_client
 
 
+# Display names for the comparison-mode UI (app.py's /api/compare) --
+# every provider this app can build a real embedding function for, keyed
+# the same way session collection name suffixes and API responses are.
+EMBEDDING_PROVIDERS = {
+    "openai": "OpenAI (text-embedding-3-small)",
+    "gemini": "Google (gemini-embedding-001)",
+}
+
+_embedding_functions_by_provider: dict[str, object] = {}
+
+
+def get_embedding_function_for(provider: str):
+    """Build (and cache) the real embedding function for one named provider.
+
+    Used directly by comparison mode, which needs both providers available
+    at once regardless of which one `get_embedding_function()` below picked
+    as this app's single default.
+    """
+    if provider in _embedding_functions_by_provider:
+        return _embedding_functions_by_provider[provider]
+
+    from chromadb.utils import embedding_functions
+
+    if provider == "openai":
+        fn = embedding_functions.OpenAIEmbeddingFunction(
+            api_key=os.environ["OPENAI_API_KEY"], model_name="text-embedding-3-small"
+        )
+    elif provider == "gemini":
+        fn = embedding_functions.GoogleGenaiEmbeddingFunction(
+            model_name="gemini-embedding-001", api_key_env_var="GOOGLE_API_KEY"
+        )
+    else:
+        raise ValueError(f"unknown embedding provider: {provider}")
+    _embedding_functions_by_provider[provider] = fn
+    return fn
+
+
+def get_embedding_function():
+    """Pick the best embedding available instead of chromadb's silent
+    default (a small local sentence-transformers model, all-MiniLM-L6-v2).
+
+    That default measurably under-retrieves on real documents: a real-world
+    eval against the same golden set (eval_multi_embedding.py) found it
+    missed the correct chunk ~40% of the time at this app's TOP_K, while
+    OpenAI's and Gemini's embedding APIs both hit 100%. A broad "what is
+    this document about" query is exactly the shape of question that
+    exposes the gap -- e.g. a paper's one sentence actually stating its
+    contribution can simply never make the top-k candidate list under the
+    default embedding, no amount of relevance/sufficiency tuning downstream
+    can recover a chunk retrieval never surfaced in the first place.
+
+    Prefers OpenAI (already a required credential for generation in the
+    common case) over Gemini over the local default, which still works --
+    just worse -- so the app runs with no embedding-specific config at all.
+    """
+    global _embedding_function
+    if _embedding_function is not None:
+        return _embedding_function
+
+    from chromadb.utils import embedding_functions
+
+    if os.environ.get("OPENAI_API_KEY"):
+        _embedding_function = get_embedding_function_for("openai")
+    elif os.environ.get("GOOGLE_API_KEY"):
+        _embedding_function = get_embedding_function_for("gemini")
+    else:
+        print(
+            "No OPENAI_API_KEY or GOOGLE_API_KEY set -- falling back to chromadb's "
+            "local default embedding, which retrieves noticeably worse on real "
+            "documents (see get_embedding_function()'s docstring).",
+            file=sys.stderr,
+        )
+        _embedding_function = embedding_functions.DefaultEmbeddingFunction()
+    return _embedding_function
+
+
+# Gemini's embedContent batch endpoint rejects more than 100 inputs in one
+# call ("at most 100 requests can be in one batch") -- verified live against
+# a 151-chunk real PDF, which failed `collection.add()` outright with every
+# chunk in one call. OpenAI's limit is far higher, but batching unconditionally
+# here is simpler and safer than branching on which provider is active.
+_ADD_BATCH_SIZE = 90
+
+# Gemini's free tier additionally rate-limits to 100 embed requests/minute
+# (also verified live -- a 429 RESOURCE_EXHAUSTED mid-upload, not just a
+# too-large-batch error). chromadb wraps every provider's error as a plain
+# ValueError, so there's no typed "retry-able" exception to catch -- retry
+# generically on any failure a couple of times with backoff rather than
+# fail an upload outright over a transient, minute-scale limit.
+_ADD_RETRY_ATTEMPTS = 3
+_ADD_RETRY_BASE_DELAY_SECONDS = 20.0
+
+
+def _add_chunks_in_batches(collection, ids: list[str], documents: list[str]) -> None:
+    for start in range(0, len(ids), _ADD_BATCH_SIZE):
+        end = start + _ADD_BATCH_SIZE
+        batch_ids, batch_docs = ids[start:end], documents[start:end]
+        for attempt in range(_ADD_RETRY_ATTEMPTS):
+            try:
+                collection.add(ids=batch_ids, documents=batch_docs)
+                break
+            except Exception:
+                if attempt == _ADD_RETRY_ATTEMPTS - 1:
+                    raise
+                time.sleep(_ADD_RETRY_BASE_DELAY_SECONDS * (attempt + 1))
+
+
 def build_vector_store():
     client = get_chroma_client()
-    collection = client.get_or_create_collection(COLLECTION_NAME)
+    collection = client.get_or_create_collection(
+        COLLECTION_NAME, embedding_function=get_embedding_function()
+    )
     if collection.count() == 0:
         ids, texts = zip(*DOCUMENTS)
-        collection.add(ids=list(ids), documents=list(texts))
+        _add_chunks_in_batches(collection, list(ids), list(texts))
     return collection
 
 
@@ -100,9 +218,9 @@ def replace_session_document(session_id: str, filename: str, chunks: list[str]):
         client.delete_collection(name)
     except Exception:
         pass  # nothing to delete yet
-    collection = client.create_collection(name)
+    collection = client.create_collection(name, embedding_function=get_embedding_function())
     ids = [f"{filename}-{i}" for i in range(len(chunks))]
-    collection.add(ids=ids, documents=chunks)
+    _add_chunks_in_batches(collection, ids, chunks)
     return collection
 
 
@@ -124,6 +242,90 @@ def remove_session_document(session_id: str) -> None:
         client.delete_collection(session_collection_name(session_id))
     except Exception:
         pass  # nothing to delete
+    remove_compare_collections(session_id)
+
+
+def compare_collection_name(session_id: str, provider: str) -> str:
+    return f"{UPLOAD_COLLECTION_PREFIX}{session_id}_cmp_{provider}"
+
+
+def get_compare_collection(session_id: str, provider: str):
+    """Returns this session's comparison-mode collection for `provider`, or
+    None if it hasn't been built yet for the current document.
+    """
+    client = get_chroma_client()
+    name = compare_collection_name(session_id, provider)
+    try:
+        collection = client.get_collection(name)
+    except Exception:
+        return None
+    return collection if collection.count() > 0 else None
+
+
+# Guards ensure_compare_collections() per session so two /api/compare
+# requests racing on the same session can't both see "not built yet",
+# each delete-and-recreate the other's in-progress collection, and crash
+# with a chromadb NotFoundError on the loser's collection.add() call --
+# verified live, see the compare-mode hang/crash investigation.
+_compare_build_locks: dict[str, threading.Lock] = {}
+_compare_build_locks_guard = threading.Lock()
+
+
+def _compare_lock_for(session_id: str) -> threading.Lock:
+    with _compare_build_locks_guard:
+        return _compare_build_locks.setdefault(session_id, threading.Lock())
+
+
+def _build_one_compare_collection(session_id: str, filename: str, chunks: list[str], provider: str) -> None:
+    client = get_chroma_client()
+    name = compare_collection_name(session_id, provider)
+    try:
+        client.delete_collection(name)
+    except Exception:
+        pass
+    collection = client.create_collection(name, embedding_function=get_embedding_function_for(provider))
+    ids = [f"{filename}-{i}" for i in range(len(chunks))]
+    _add_chunks_in_batches(collection, ids, chunks)
+
+
+def ensure_compare_collections(session_id: str, filename: str, chunks: list[str]) -> None:
+    """Build this session's per-provider comparison collections if they
+    don't already exist, embedding the same chunks the single-provider
+    collection uses.
+
+    Built lazily on first use of compare mode, not on every upload -- most
+    sessions never open compare mode, and building both costs two full
+    embedding API passes over the document for nothing if it's never used.
+
+    Runs under a per-session lock (a second concurrent call just waits and
+    then finds everything already built) and builds whichever providers are
+    missing in parallel rather than one after another -- on a large document,
+    embedding through two providers sequentially (each with its own batching
+    and rate-limit retries) is what was stretching a single compare request
+    past two minutes.
+    """
+    with _compare_lock_for(session_id):
+        missing = [p for p in EMBEDDING_PROVIDERS if get_compare_collection(session_id, p) is None]
+        if not missing:
+            return
+        with ThreadPoolExecutor(max_workers=len(missing)) as pool:
+            list(
+                pool.map(
+                    lambda provider: _build_one_compare_collection(session_id, filename, chunks, provider),
+                    missing,
+                )
+            )
+
+
+def remove_compare_collections(session_id: str) -> None:
+    client = get_chroma_client()
+    for provider in EMBEDDING_PROVIDERS:
+        try:
+            client.delete_collection(compare_collection_name(session_id, provider))
+        except Exception:
+            pass  # nothing to delete
+    with _compare_build_locks_guard:
+        _compare_build_locks.pop(session_id, None)
 
 
 def _word_boundary_end(text: str, start: int, chunk_size: int) -> int:
@@ -212,8 +414,32 @@ def extract_text(filename: str, content: bytes) -> str:
     raise ValueError(f"Unsupported file type: .{ext or '?'} (supported: .txt, .md, .pdf)")
 
 
+TOP_K_FRACTION = 0.08  # of the collection's total chunk count
+TOP_K_MAX = 30  # relevance-check cost scales with k (one decision call per
+# candidate, parallelized up to 8 at a time -- see rag_guard/relevance.py),
+# so this caps how far a huge document can push it up
+
+
+def _effective_top_k(collection) -> int:
+    """TOP_K scaled to the document's size.
+
+    A fixed TOP_K=12 means a 50-chunk document gets ~24% of itself as
+    retrieval candidates per query, but a 250-chunk one gets ~5% -- on a
+    large document a broad question (e.g. "what are the open problems")
+    routinely has its one relevant section simply not make the candidate
+    list at all, which no amount of relevance-threshold tuning downstream
+    can recover from. Scaling with `collection.count()` keeps candidate
+    coverage roughly proportional instead of collapsing on large docs,
+    capped at TOP_K_MAX so relevance-check cost doesn't grow unbounded.
+    """
+    total_chunks = collection.count()
+    return min(TOP_K_MAX, max(TOP_K, round(total_chunks * TOP_K_FRACTION)))
+
+
 def make_retriever(collection):
-    def retrieve(query: str, k: int = TOP_K) -> list[Chunk]:
+    def retrieve(query: str, k: int | None = None) -> list[Chunk]:
+        if k is None:
+            k = _effective_top_k(collection)
         results = collection.query(query_texts=[query], n_results=k)
         ids = results["ids"][0]
         texts = results["documents"][0]
