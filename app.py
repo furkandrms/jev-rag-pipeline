@@ -17,6 +17,10 @@ JSON/SSE API the frontend calls:
                                 session's Chroma collection. A new upload
                                 replaces the previous one for that session
                                 and clears its response cache (see below).
+  DELETE /api/document        -- remove this session's document outright
+                                (no replacement) and clear its cache, so
+                                the UI can offer a real "remove" action,
+                                not just "upload a different one".
   POST /api/chat             -- plain JSON request/response version of the
                                 pipeline (used by curl/tests); blocks until
                                 the full result is ready.
@@ -65,6 +69,7 @@ from pipeline_setup import (
     extract_text,
     get_session_collection,
     make_retriever,
+    remove_session_document,
     replace_session_document,
     setup,
 )
@@ -99,6 +104,11 @@ class ChatRequest(BaseModel):
 
 def _elapsed_ms(start: float) -> float:
     return round((time.monotonic() - start) * 1000, 1)
+
+
+def _clear_session_cache(session_id: str) -> None:
+    for key in [k for k in _response_cache if k[0] == session_id]:
+        del _response_cache[key]
 
 
 def _serialize_relevance(relevance) -> list[dict]:
@@ -255,14 +265,19 @@ async def upload(
         raise HTTPException(400, "No extractable text found in that file")
 
     replace_session_document(x_session_id, file.filename or "upload", chunks)
-
-    # A new document invalidates any cached answers from the previous one.
-    for key in [k for k in _response_cache if k[0] == x_session_id]:
-        del _response_cache[key]
+    _clear_session_cache(x_session_id)  # a new document invalidates cached answers from the old one
 
     meta = {"filename": file.filename, "chunk_count": len(chunks), "chunks": chunks}
     _session_meta[x_session_id] = meta
     return meta
+
+
+@app.delete("/api/document")
+def delete_document(x_session_id: str = Header(..., alias="X-Session-Id")) -> dict:
+    remove_session_document(x_session_id)
+    _clear_session_cache(x_session_id)
+    _session_meta.pop(x_session_id, None)
+    return {"removed": True}
 
 
 @app.post("/api/chat")

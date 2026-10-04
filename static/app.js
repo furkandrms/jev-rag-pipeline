@@ -203,8 +203,26 @@ uploadDropEl.addEventListener("drop", (e) => {
   if (file) uploadFile(file);
 });
 
-docChangeBtnEl.addEventListener("click", () => {
+docChangeBtnEl.addEventListener("click", async () => {
+  docChangeBtnEl.disabled = true;
+  try {
+    await fetch("/api/document", { method: "DELETE", headers: { "X-Session-Id": sessionId } });
+  } catch (e) {
+    // Even if the request fails, still drop back to the upload view --
+    // the next upload will overwrite whatever's left server-side anyway.
+  }
   fileInputEl.value = "";
+  chatEl.innerHTML = `
+    <div class="intro">
+      <p>Ask something about the document you uploaded.</p>
+      <p class="intro-hint">Watch the activity log on the right -- it shows exactly what the system did at each stage, live.</p>
+    </div>
+  `;
+  activityLogEl.innerHTML = "";
+  Object.assign(sessionMetrics, {
+    queries: 0, cacheHits: 0, inputTokens: 0, outputTokens: 0, decisionCalls: 0, latencies: [],
+  });
+  docChangeBtnEl.disabled = false;
   showUploadView();
 });
 

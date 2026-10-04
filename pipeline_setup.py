@@ -107,6 +107,15 @@ def get_session_collection(session_id: str):
     return collection if collection.count() > 0 else None
 
 
+def remove_session_document(session_id: str) -> None:
+    """Delete this session's document outright (not a replace -- nothing takes its place)."""
+    client = get_chroma_client()
+    try:
+        client.delete_collection(session_collection_name(session_id))
+    except Exception:
+        pass  # nothing to delete
+
+
 def chunk_text(text: str, chunk_size: int = 800, overlap: int = 100) -> list[str]:
     """Paragraph-aware chunking: pack whole paragraphs up to chunk_size,
     and only hard-split a paragraph that's longer than chunk_size on its own

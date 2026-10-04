@@ -32,9 +32,11 @@ body {
 }
 
 .app {
-  max-width: 1360px;
+  width: 100%;
+  max-width: 1680px;
   margin: 0 auto;
   height: 100vh;
+  height: 100dvh;
   display: flex;
   flex-direction: column;
 }
@@ -43,7 +45,9 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 20px 22px 16px;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 16px clamp(16px, 3vw, 28px) 14px;
   border-bottom: 1px solid var(--border);
 }
 
@@ -72,6 +76,7 @@ body {
 
 .backend-badges {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
 }
 
@@ -185,7 +190,7 @@ body {
 }
 
 .side-col {
-  width: 340px;
+  width: clamp(280px, 27vw, 380px);
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
@@ -224,7 +229,9 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 22px;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 12px clamp(16px, 3vw, 22px);
   border-bottom: 1px solid var(--border);
 }
 
@@ -249,6 +256,11 @@ body {
   font-weight: 600;
   cursor: pointer;
   padding: 2px;
+}
+
+.doc-change-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .doc-change-btn:hover {
@@ -465,7 +477,7 @@ body {
 .chat {
   flex: 1;
   overflow-y: auto;
-  padding: 24px 22px 12px;
+  padding: 24px clamp(16px, 3vw, 28px) 12px;
   display: flex;
   flex-direction: column;
   gap: 18px;
@@ -817,7 +829,7 @@ body {
 .composer {
   display: flex;
   gap: 10px;
-  padding: 16px 22px 22px;
+  padding: 16px clamp(16px, 3vw, 22px) clamp(16px, 3vw, 22px);
   border-top: 1px solid var(--border);
 }
 
@@ -887,7 +899,11 @@ body {
   border-radius: 999px;
 }
 
-@media (max-width: 860px) {
+/* Anything narrower than this can't fit chat + sidebar side by side
+   without squeezing the chat column uncomfortably -- stack instead.
+   1000px catches common "half a laptop screen" Chrome window widths,
+   not just phones/tablets. */
+@media (max-width: 1000px) {
   body {
     overflow: auto;
     height: auto;
@@ -896,6 +912,7 @@ body {
   .app {
     height: auto;
     min-height: 100vh;
+    min-height: 100dvh;
   }
 
   .layout {
@@ -917,5 +934,28 @@ body {
 
   .side-section-grow {
     min-height: 240px;
+  }
+}
+
+@media (max-width: 520px) {
+  .brand-title {
+    font-size: 14px;
+  }
+
+  .backend-badges {
+    display: none; /* real estate better spent on the chat itself on phones */
+  }
+
+  .upload-card h1 {
+    font-size: 18px;
+  }
+
+  .msg-user .msg-bubble,
+  .msg-assistant .msg-bubble {
+    max-width: 94%;
+  }
+
+  .metrics-grid {
+    grid-template-columns: 1fr 1fr 1fr;
   }
 }
