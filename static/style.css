@@ -164,6 +164,75 @@ body {
   margin-top: 12px;
 }
 
+/* --- Sample document picker (upload view) -------------------------------- */
+
+.sample-docs {
+  margin-top: 28px;
+  text-align: left;
+}
+
+.sample-docs-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--text-dimmer);
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 14px;
+}
+
+.sample-docs-divider::before,
+.sample-docs-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+.sample-docs-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px;
+}
+
+.sample-doc-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  min-height: 44px;
+  color: var(--text);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.sample-doc-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--bg-card-2);
+}
+
+.sample-doc-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.sample-doc-title {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.sample-doc-topic {
+  font-size: 11.5px;
+  color: var(--text-dimmer);
+}
+
 .upload-drop {
   display: flex;
   flex-direction: column;

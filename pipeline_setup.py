@@ -201,6 +201,64 @@ def build_vector_store():
     return collection
 
 
+# --- Sample documents (optional, served from GCS) ---------------------------
+# A small fixed catalog of real papers for a "try a sample document" picker,
+# so a visitor can see the full pipeline run on a real document without
+# having one of their own to upload. Entirely optional: only usable when
+# SAMPLE_DOCS_BUCKET is set (e.g. in the Cloud Run deployment) -- local dev
+# without GCS credentials just doesn't advertise the feature (see
+# sample_docs_available(), which app.py's /api/samples returns verbatim).
+SAMPLE_DOCS = [
+    {"id": "attention", "filename": "01_nlp_attention_is_all_you_need.pdf", "title": "Attention Is All You Need", "topic": "NLP / Transformers"},
+    {"id": "climate-ml", "filename": "02_climate_ml_review.pdf", "title": "Climate Modeling with Machine Learning", "topic": "Climate science"},
+    {"id": "quantum-cloud", "filename": "03_quantum_cloud_review.pdf", "title": "Quantum Cloud Computing: A Review", "topic": "Quantum computing"},
+    {"id": "inflation-fewnet", "filename": "04_inflation_forecasting_fewnet.pdf", "title": "Inflation Forecasting with FewNet", "topic": "Economics"},
+    {"id": "autonomous-driving", "filename": "05_autonomous_driving_e2e.pdf", "title": "End-to-End Autonomous Driving", "topic": "Robotics / autonomous vehicles"},
+    {"id": "resnet", "filename": "06_resnet.pdf", "title": "Deep Residual Learning (ResNet)", "topic": "Computer vision"},
+    {"id": "intrusion-detection", "filename": "07_intrusion_detection_survey.pdf", "title": "Intrusion Detection: A Survey", "topic": "Cybersecurity"},
+    {"id": "crispr-grna", "filename": "08_crispr_grna_ai.pdf", "title": "AI for CRISPR Guide RNA Design", "topic": "Bioinformatics"},
+    {"id": "solar-power", "filename": "09_solar_power_prediction.pdf", "title": "Solar Power Prediction", "topic": "Renewable energy"},
+    {"id": "covid-imaging", "filename": "10_covid_medical_imaging_dl.pdf", "title": "COVID Medical Imaging with Deep Learning", "topic": "Medical imaging"},
+]
+_SAMPLE_DOCS_BY_ID = {d["id"]: d for d in SAMPLE_DOCS}
+
+_gcs_client = None
+
+
+def _get_gcs_client():
+    global _gcs_client
+    if _gcs_client is None:
+        from google.cloud import storage
+
+        _gcs_client = storage.Client()
+    return _gcs_client
+
+
+def sample_docs_available() -> list[dict]:
+    """The sample-doc catalog (id/title/topic only, no filenames leaked),
+    or an empty list if no bucket is configured. The frontend hides the
+    picker entirely when this is empty rather than showing a broken one.
+    """
+    if not os.environ.get("SAMPLE_DOCS_BUCKET"):
+        return []
+    return [{"id": d["id"], "title": d["title"], "topic": d["topic"]} for d in SAMPLE_DOCS]
+
+
+def fetch_sample_doc(sample_id: str) -> tuple[str, bytes]:
+    """Downloads one sample document's raw bytes from GCS.
+
+    Raises KeyError for an unknown id (caller turns that into a 404) and
+    lets any GCS client exception (missing bucket/object, auth failure)
+    propagate -- the caller turns that into a 502, since it's an upstream
+    fetch failure, not a client error.
+    """
+    doc = _SAMPLE_DOCS_BY_ID[sample_id]
+    bucket_name = os.environ["SAMPLE_DOCS_BUCKET"]
+    bucket = _get_gcs_client().bucket(bucket_name)
+    blob = bucket.blob(doc["filename"])
+    return doc["filename"], blob.download_as_bytes()
+
+
 def session_collection_name(session_id: str) -> str:
     return f"{UPLOAD_COLLECTION_PREFIX}{session_id}"
 

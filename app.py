@@ -73,11 +73,13 @@ from pipeline_setup import (
     chunk_text,
     ensure_compare_collections,
     extract_text,
+    fetch_sample_doc,
     get_compare_collection,
     get_session_collection,
     make_retriever,
     remove_session_document,
     replace_session_document,
+    sample_docs_available,
     setup,
 )
 from rag_guard import Chunk
@@ -155,6 +157,10 @@ def _remember_turn(session_id: str, query: str, answer: str) -> None:
 
 class ChatRequest(BaseModel):
     query: str
+
+
+class SampleUploadRequest(BaseModel):
+    sample_id: str
 
 
 def _elapsed_ms(start: float) -> float:
@@ -684,6 +690,35 @@ async def upload(
     meta = {"filename": file.filename, "chunk_count": len(chunks), "chunks": chunks}
     _session_meta[x_session_id] = meta
     stage_log(x_session_id, "upload", f"{file.filename!r} -> {len(chunks)} chunks indexed")
+    return meta
+
+
+@app.get("/api/samples")
+def list_samples() -> dict:
+    return {"samples": sample_docs_available()}
+
+
+@app.post("/api/upload-sample")
+def upload_sample(request: SampleUploadRequest, x_session_id: str = Header(..., alias="X-Session-Id")) -> dict:
+    x_session_id = _check_session_id(x_session_id)
+    try:
+        filename, content = fetch_sample_doc(request.sample_id)
+    except KeyError:
+        raise HTTPException(404, "Unknown sample document") from None
+    except Exception as exc:
+        raise HTTPException(502, "Could not fetch the sample document right now") from exc
+
+    text = extract_text(filename, content)
+    chunks = chunk_text(text)
+    if not chunks:
+        raise HTTPException(400, "No extractable text found in that sample")
+
+    replace_session_document(x_session_id, filename, chunks)
+    _clear_session_cache(x_session_id)
+
+    meta = {"filename": filename, "chunk_count": len(chunks), "chunks": chunks}
+    _session_meta[x_session_id] = meta
+    stage_log(x_session_id, "upload", f"sample {filename!r} -> {len(chunks)} chunks indexed")
     return meta
 
 

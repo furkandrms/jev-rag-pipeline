@@ -10,6 +10,8 @@ const uploadDropEl = document.getElementById("upload-drop");
 const uploadLabelEl = document.getElementById("upload-label");
 const uploadStatusEl = document.getElementById("upload-status");
 const fileInputEl = document.getElementById("file-input");
+const sampleDocsEl = document.getElementById("sample-docs");
+const sampleDocsGridEl = document.getElementById("sample-docs-grid");
 const docChipNameEl = document.getElementById("doc-chip-name");
 const docChipCountEl = document.getElementById("doc-chip-count");
 const docChangeBtnEl = document.getElementById("doc-change-btn");
@@ -271,6 +273,22 @@ chatEl.addEventListener("click", (e) => {
 
 /* --- Upload ----------------------------------------------------------------- */
 
+// Shared by a real file upload and a sample-document pick -- both end with
+// the same server response shape ({filename, chunk_count, chunks}) and the
+// same "fresh document for this session" reset, just via different
+// endpoints and different in-flight status text.
+function applyUploadSuccess(data) {
+  chatEl.innerHTML = emptyStateHtml();
+  Object.assign(sessionMetrics, {
+    queries: 0, cacheHits: 0, inputTokens: 0, outputTokens: 0, decisionCalls: 0, latencies: [],
+  });
+  activityLogEl.innerHTML = "";
+  uploadStatusEl.textContent = "";
+  showChatView(data.filename, data.chunk_count, data.chunks);
+  renderMetricsStrip();
+  logLine("ok", `document indexed: <b>${escapeHtml(data.filename)}</b> · ${data.chunk_count} chunks`);
+}
+
 async function uploadFile(file) {
   uploadLabelEl.textContent = `Uploading ${file.name}…`;
   uploadStatusEl.textContent = "";
@@ -290,24 +308,74 @@ async function uploadFile(file) {
       throw new Error(data.detail || "Upload failed");
     }
 
-    // Fresh document for this session -- clear conversation + metrics so
-    // old answers/stats don't sit alongside a different document's context.
-    chatEl.innerHTML = emptyStateHtml();
-    Object.assign(sessionMetrics, {
-      queries: 0, cacheHits: 0, inputTokens: 0, outputTokens: 0, decisionCalls: 0, latencies: [],
-    });
-    activityLogEl.innerHTML = "";
     uploadLabelEl.textContent = `Drop a .txt / .md / .pdf here, or click to choose a file`;
-    uploadStatusEl.textContent = "";
-    showChatView(data.filename, data.chunk_count, data.chunks);
-    renderMetricsStrip();
-    logLine("ok", `document indexed: <b>${escapeHtml(data.filename)}</b> · ${data.chunk_count} chunks`);
+    applyUploadSuccess(data);
   } catch (e) {
     uploadLabelEl.textContent = `Drop a .txt / .md / .pdf here, or click to choose a file`;
     uploadStatusEl.textContent = e.message || "Upload failed";
     uploadStatusEl.className = "upload-status error";
   }
 }
+
+/* --- Sample document picker -------------------------------------------------- */
+// An optional "try one of these instead" row on the upload screen -- only
+// shown when the backend actually has sample documents configured (a GCS
+// bucket set via SAMPLE_DOCS_BUCKET; see pipeline_setup.py). Local dev
+// without that env var just gets an empty list back and the row stays
+// hidden, no broken UI either way.
+
+async function loadSamples() {
+  try {
+    const res = await fetch("/api/samples");
+    const data = await res.json();
+    const samples = data.samples || [];
+    if (!samples.length) return;
+
+    sampleDocsGridEl.innerHTML = samples
+      .map(
+        (s) => `
+        <button type="button" class="sample-doc-btn" data-sample-id="${escapeHtml(s.id)}">
+          <span class="sample-doc-title">${escapeHtml(s.title)}</span>
+          <span class="sample-doc-topic">${escapeHtml(s.topic)}</span>
+        </button>`
+      )
+      .join("");
+    sampleDocsEl.hidden = false;
+  } catch (e) {
+    // No sample catalog available -- the picker just doesn't appear.
+  }
+}
+
+async function uploadSample(sampleId, btn) {
+  const originalLabel = btn.innerHTML;
+  sampleDocsGridEl.querySelectorAll(".sample-doc-btn").forEach((b) => (b.disabled = true));
+  btn.innerHTML = `<span class="sample-doc-title"><span class="dots">Loading</span></span>`;
+  uploadStatusEl.textContent = "";
+  uploadStatusEl.className = "upload-status";
+
+  try {
+    const res = await fetch("/api/upload-sample", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Session-Id": sessionId },
+      body: JSON.stringify({ sample_id: sampleId }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.detail || "Could not load that sample.");
+    }
+    applyUploadSuccess(data);
+  } catch (e) {
+    uploadStatusEl.textContent = e.message || "Could not load that sample.";
+    uploadStatusEl.className = "upload-status error";
+    sampleDocsGridEl.querySelectorAll(".sample-doc-btn").forEach((b) => (b.disabled = false));
+    btn.innerHTML = originalLabel;
+  }
+}
+
+sampleDocsGridEl.addEventListener("click", (e) => {
+  const btn = e.target.closest(".sample-doc-btn");
+  if (btn) uploadSample(btn.dataset.sampleId, btn);
+});
 
 fileInputEl.addEventListener("change", () => {
   if (fileInputEl.files[0]) uploadFile(fileInputEl.files[0]);
@@ -935,3 +1003,4 @@ compareComposer.addEventListener("submit", (e) => {
 
 checkExistingDocument();
 loadInfo();
+loadSamples();

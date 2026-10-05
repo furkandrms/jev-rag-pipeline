@@ -1,0 +1,13 @@
+.venv
+venv
+__pycache__
+*.pyc
+.git
+.env
+.env.*
+!.env.example
+.DS_Store
+*.pdf
+test_pdf/
+screenshots/
+*.md

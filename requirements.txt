@@ -19,3 +19,9 @@ fastapi>=0.110
 uvicorn[standard]>=0.29
 python-multipart>=0.0.9   # required by FastAPI for file uploads (UploadFile)
 pypdf>=4.0                 # PDF text extraction for /api/upload
+
+# "Try a sample document" picker -- fetches a small fixed catalog of real
+# papers from a GCS bucket (SAMPLE_DOCS_BUCKET) instead of requiring every
+# visitor to have their own file to upload. No-op locally without that env
+# var set; see pipeline_setup.py's sample_docs_available().
+google-cloud-storage>=2.14
