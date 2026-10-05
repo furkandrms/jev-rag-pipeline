@@ -4,16 +4,19 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="description" content="Upload a document and ask questions about it, with every answer backed by a visible relevance, sufficiency, and grounding trace." />
-  <meta name="theme-color" content="#0b0d12" />
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b0d12'/%3E%3Ccircle cx='16' cy='16' r='9' fill='none' stroke='%237c9fff' stroke-width='3'/%3E%3C/svg%3E" />
-  <title>Document chat · guarded by rag-guard</title>
-  <link rel="stylesheet" href="/static/style.css?v=4" />
+  <meta name="theme-color" content="#0a0c11" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 28 28'%3E%3Crect width='28' height='28' rx='8' fill='%23161b24'/%3E%3Cpath d='M14 6l6.5 2.5v5.2c0 3.6-2.6 6.3-6.5 8.3-3.9-2-6.5-4.7-6.5-8.3V8.5L14 6z' stroke='%237f95ff' stroke-width='1.6' fill='none'/%3E%3C/svg%3E" />
+  <title>Document chat &middot; guarded by rag-guard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/style.css?v=5" />
 </head>
 <body>
   <div class="app">
     <header class="topbar">
-      <a class="brand" href="/" style="text-decoration:none; color:inherit;">
-        <img class="brand-mark" src="/static/logo.png" alt="" />
+      <a class="brand" href="/">
+        <img class="brand-mark" src="/static/logo.png?v=2" alt="" />
         <div>
           <div class="brand-title">Document chat</div>
           <div class="brand-sub">guarded by rag-guard</div>
@@ -45,10 +48,14 @@
     <!-- View B: shown once a document is uploaded for this session -->
     <div class="view-chat-outer" id="view-chat" hidden>
       <div class="doc-bar">
-        <span class="doc-chip" id="doc-chip"></span>
+        <span class="doc-chip" id="doc-chip">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4 1.5h5l3 3V14a.5.5 0 01-.5.5h-7.5A.5.5 0 013.5 14V2a.5.5 0 01.5-.5z" stroke="currentColor" stroke-width="1.2"/><path d="M9 1.5V5h3" stroke="currentColor" stroke-width="1.2"/></svg>
+          <span class="doc-chip-name" id="doc-chip-name"></span>
+          <span class="doc-chip-count mono" id="doc-chip-count"></span>
+        </span>
         <div class="mode-toggle" id="mode-toggle" role="group" aria-label="Pipeline view mode">
           <button type="button" class="mode-btn active" data-mode="single">Single provider</button>
-          <button type="button" class="mode-btn" data-mode="compare">Compare (2)</button>
+          <button type="button" class="mode-btn" data-mode="compare">Compare <span class="mono" style="opacity:.7">2</span></button>
         </div>
         <button type="button" class="doc-change-btn" id="doc-change-btn">Remove document</button>
       </div>
@@ -56,9 +63,14 @@
       <div class="layout" id="single-provider-view">
         <div class="main-col">
           <main class="chat" id="chat" aria-live="polite">
-            <div class="intro" id="intro-chat">
-              <p>Ask something about the document you uploaded.</p>
-              <p class="intro-hint">Watch the activity log on the right — it shows exactly what the system did at each stage, live.</p>
+            <div class="empty-state" id="empty-state">
+              <h2>Ask anything about this document</h2>
+              <p>Every answer arrives with the decisions behind it: what was retrieved, what was kept, and whether each claim is supported.</p>
+              <div class="suggestions" id="suggestions">
+                <button type="button" class="sug" data-q="What is this document about?">What is this document about?</button>
+                <button type="button" class="sug" data-q="What are the key findings or conclusions?">What are the key findings or conclusions?</button>
+                <button type="button" class="sug" data-q="Summarize the main sections of this document.">Summarize the main sections of this document.</button>
+              </div>
             </div>
           </main>
 
@@ -77,36 +89,39 @@
         </div>
 
         <aside class="side-col">
-          <div class="side-section">
-            <h3 class="side-title">Pipeline stage</h3>
-            <div class="stepper stepper-side" id="side-stepper"></div>
+          <div class="inspector-tabs" role="tablist" aria-label="Inspector">
+            <button type="button" role="tab" id="insp-tab-pipeline" class="insp-tab active" aria-selected="true" aria-controls="insp-panel-pipeline" data-tab="pipeline">Pipeline</button>
+            <button type="button" role="tab" id="insp-tab-chunks" class="insp-tab" aria-selected="false" aria-controls="insp-panel-chunks" data-tab="chunks">Chunks <span class="mono tab-count" id="chunks-tab-count"></span></button>
+            <button type="button" role="tab" id="insp-tab-log" class="insp-tab" aria-selected="false" aria-controls="insp-panel-log" data-tab="log">Log</button>
           </div>
 
-          <div class="side-section">
-            <h3 class="side-title">Session metrics</h3>
+          <div class="insp-panel" id="insp-panel-pipeline" role="tabpanel" aria-labelledby="insp-tab-pipeline">
+            <h3 class="side-title">Pipeline stage</h3>
+            <div class="stage-timeline" id="side-stepper"></div>
+            <h3 class="side-title" style="margin-top:22px">Session metrics</h3>
             <div class="metrics-grid" id="metrics-strip"></div>
           </div>
 
-          <div class="side-section side-section-chunks">
-            <h3 class="side-title" id="chunks-title">Document chunks</h3>
+          <div class="insp-panel" id="insp-panel-chunks" role="tabpanel" aria-labelledby="insp-tab-chunks" hidden>
             <div class="chunks-panel" id="chunks-panel"></div>
           </div>
 
-          <div class="side-section side-section-grow">
-            <h3 class="side-title">Activity log</h3>
+          <div class="insp-panel insp-panel-log" id="insp-panel-log" role="tabpanel" aria-labelledby="insp-tab-log" hidden>
             <div class="activity-log" id="activity-log"></div>
           </div>
         </aside>
       </div>
 
       <div class="compare-view" id="compare-view" hidden>
-        <div class="compare-intro" id="compare-intro">
-          <p>Ask a question to see it answered twice, once per embedding provider — each with a raw (unprotected) answer and the real JEV-guarded one side by side.</p>
+        <div class="compare-scroll" id="compare-scroll">
+          <div class="compare-intro" id="compare-intro">
+            <p>Ask a question to see it answered twice, once per embedding provider — each with a raw (unprotected) answer and the real JEV-guarded one side by side.</p>
+          </div>
+
+          <div class="compare-columns" id="compare-columns"></div>
+
+          <div class="compare-summary" id="compare-summary"></div>
         </div>
-
-        <div class="compare-columns" id="compare-columns"></div>
-
-        <div class="compare-summary" id="compare-summary"></div>
 
         <form class="composer" id="compare-composer">
           <input
@@ -130,6 +145,7 @@
       <div class="msg-bubble">
         <div class="action-badge"></div>
         <div class="msg-text"></div>
+        <div class="supported-by"></div>
       </div>
       <button class="trace-toggle" type="button">
         <span class="chevron">›</span> Full reasoning trace
@@ -138,6 +154,6 @@
     </div>
   </template>
 
-  <script src="/static/app.js?v=4"></script>
+  <script src="/static/app.js?v=5"></script>
 </body>
 </html>

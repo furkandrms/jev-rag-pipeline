@@ -10,9 +10,11 @@ const uploadDropEl = document.getElementById("upload-drop");
 const uploadLabelEl = document.getElementById("upload-label");
 const uploadStatusEl = document.getElementById("upload-status");
 const fileInputEl = document.getElementById("file-input");
-const docChipEl = document.getElementById("doc-chip");
+const docChipNameEl = document.getElementById("doc-chip-name");
+const docChipCountEl = document.getElementById("doc-chip-count");
 const docChangeBtnEl = document.getElementById("doc-change-btn");
 const chunksPanelEl = document.getElementById("chunks-panel");
+const chunksTabCountEl = document.getElementById("chunks-tab-count");
 const metricsStripEl = document.getElementById("metrics-strip");
 const activityLogEl = document.getElementById("activity-log");
 const sideStepperEl = document.getElementById("side-stepper");
@@ -25,6 +27,12 @@ const compareSummaryEl = document.getElementById("compare-summary");
 const compareComposer = document.getElementById("compare-composer");
 const compareInput = document.getElementById("compare-query-input");
 const compareSendBtn = document.getElementById("compare-send-btn");
+const inspTabEls = document.querySelectorAll(".insp-tab");
+const inspPanels = {
+  pipeline: document.getElementById("insp-panel-pipeline"),
+  chunks: document.getElementById("insp-panel-chunks"),
+  log: document.getElementById("insp-panel-log"),
+};
 
 let thresholds = {
   relevance_threshold: 0.5,
@@ -56,6 +64,11 @@ const ACTION_LABELS = {
   escalate: "Escalated to a human",
   refuse: "Refused",
 };
+
+// A raw answer containing unrendered LaTeX delimiters reads as garbled text
+// instead of math -- called out explicitly in compare mode's raw (guard
+// off) column rather than silently rendered as if it were normal prose.
+const LATEX_RE = /\\\(|\\\)|\\\[|\\\]|\$\$/;
 
 // Real, session-local counters -- no fabricated numbers. Reset on page
 // reload since they're not persisted server-side (see README).
@@ -92,9 +105,7 @@ function pct(p) {
   return `${Math.round(p * 100)}%`;
 }
 
-/* --- Pipeline stage (sidebar) ------------------------------------------------ */
-// Mirrors the stepper shown inline in the active chat bubble, so the
-// current stage is also visible without scrolling back up to the message.
+/* --- Pipeline stage (inline bubble stepper) ------------------------------- */
 
 function stepperHtml() {
   return STAGES.map(
@@ -102,9 +113,53 @@ function stepperHtml() {
   ).join("");
 }
 
-function renderSideStepperIdle() {
-  sideStepperEl.innerHTML = `<div class="stepper-empty">No active query.</div>`;
+/* --- Pipeline stage (sidebar timeline) ------------------------------------ */
+// A fuller, vertical echo of the same stepper -- dot, name, a short result
+// string (the same text the activity log prints), and timing -- so the
+// current/last query's decisions are visible without scrolling back up to
+// the message bubble.
+
+function timelineRowHtml(s) {
+  return `
+    <div class="timeline-row" data-stage="${s.key}">
+      <span class="timeline-dot"></span>
+      <span class="timeline-body">
+        <span class="timeline-name">${s.label}</span>
+        <span class="timeline-result mono"></span>
+      </span>
+      <span class="timeline-ms mono"></span>
+    </div>`;
 }
+
+function renderSideTimelineIdle() {
+  sideStepperEl.innerHTML = STAGES.map(timelineRowHtml).join("");
+}
+
+function setSideTimelineStage(key, state, ms, resultText) {
+  const el = sideStepperEl.querySelector(`.timeline-row[data-stage="${key}"]`);
+  if (!el) return;
+  el.className = `timeline-row ${state}`;
+  el.querySelector(".timeline-result").textContent =
+    resultText || (state === "active" ? "running…" : state === "skipped" ? "skipped" : "");
+  el.querySelector(".timeline-ms").textContent = ms !== undefined ? `${ms}ms` : "";
+}
+
+/* --- Inspector tabs (Pipeline / Chunks / Log) ------------------------------ */
+
+function setInspectorTab(tab) {
+  inspTabEls.forEach((btn) => {
+    const active = btn.dataset.tab === tab;
+    btn.classList.toggle("active", active);
+    btn.setAttribute("aria-selected", active ? "true" : "false");
+  });
+  Object.entries(inspPanels).forEach(([key, el]) => {
+    el.hidden = key !== tab;
+  });
+}
+
+inspTabEls.forEach((btn) => {
+  btn.addEventListener("click", () => setInspectorTab(btn.dataset.tab));
+});
 
 /* --- Activity log ----------------------------------------------------------- */
 // A live, timestamped record of what the system actually did -- every line
@@ -150,10 +205,12 @@ function showUploadView() {
 function showChatView(filename, chunkCount, chunks) {
   viewUploadEl.hidden = true;
   viewChatEl.hidden = false;
-  docChipEl.textContent = `📄 ${filename} · ${chunkCount} chunks`;
+  docChipNameEl.textContent = filename;
+  docChipCountEl.textContent = `${chunkCount} chunks`;
   renderChunksPanel(chunks || []);
   renderMetricsStrip();
-  renderSideStepperIdle();
+  renderSideTimelineIdle();
+  setInspectorTab("pipeline");
   setMode("single");
   input.focus();
 }
@@ -189,6 +246,29 @@ async function checkExistingDocument() {
   }
 }
 
+/* --- Empty state (no messages yet) ------------------------------------------ */
+
+function emptyStateHtml() {
+  return `
+    <div class="empty-state" id="empty-state">
+      <h2>Ask anything about this document</h2>
+      <p>Every answer arrives with the decisions behind it: what was retrieved, what was kept, and whether each claim is supported.</p>
+      <div class="suggestions" id="suggestions">
+        <button type="button" class="sug" data-q="What is this document about?">What is this document about?</button>
+        <button type="button" class="sug" data-q="What are the key findings or conclusions?">What are the key findings or conclusions?</button>
+        <button type="button" class="sug" data-q="Summarize the main sections of this document.">Summarize the main sections of this document.</button>
+      </div>
+    </div>`;
+}
+
+// Event delegation on the chat container itself -- it persists across
+// resets (only its innerHTML changes between documents/queries), so one
+// listener covers every empty-state render without re-attaching.
+chatEl.addEventListener("click", (e) => {
+  const btn = e.target.closest(".sug");
+  if (btn) sendQuery(btn.dataset.q);
+});
+
 /* --- Upload ----------------------------------------------------------------- */
 
 async function uploadFile(file) {
@@ -212,12 +292,7 @@ async function uploadFile(file) {
 
     // Fresh document for this session -- clear conversation + metrics so
     // old answers/stats don't sit alongside a different document's context.
-    chatEl.innerHTML = `
-      <div class="intro">
-        <p>Ask something about the document you uploaded.</p>
-        <p class="intro-hint">Watch the pipeline run live — retrieval, relevance, sufficiency, generation, and grounding, each with real timing and token counts.</p>
-      </div>
-    `;
+    chatEl.innerHTML = emptyStateHtml();
     Object.assign(sessionMetrics, {
       queries: 0, cacheHits: 0, inputTokens: 0, outputTokens: 0, decisionCalls: 0, latencies: [],
     });
@@ -264,12 +339,7 @@ docChangeBtnEl.addEventListener("click", async () => {
     // the next upload will overwrite whatever's left server-side anyway.
   }
   fileInputEl.value = "";
-  chatEl.innerHTML = `
-    <div class="intro">
-      <p>Ask something about the document you uploaded.</p>
-      <p class="intro-hint">Watch the activity log on the right — it shows exactly what the system did at each stage, live.</p>
-    </div>
-  `;
+  chatEl.innerHTML = emptyStateHtml();
   activityLogEl.innerHTML = "";
   Object.assign(sessionMetrics, {
     queries: 0, cacheHits: 0, inputTokens: 0, outputTokens: 0, decisionCalls: 0, latencies: [],
@@ -281,7 +351,7 @@ docChangeBtnEl.addEventListener("click", async () => {
 /* --- Chunk panel -------------------------------------------------------------- */
 
 function renderChunksPanel(chunks) {
-  document.getElementById("chunks-title").textContent = `Document chunks (${chunks.length})`;
+  chunksTabCountEl.textContent = chunks.length ? String(chunks.length) : "";
   if (!chunks.length) {
     chunksPanelEl.innerHTML = `<div class="chunks-empty">No chunks indexed.</div>`;
     return;
@@ -312,7 +382,6 @@ function renderMetricsStrip() {
     <div class="metric-item" title="Relevance/sufficiency/grounding judgments made by the decision model"><span class="metric-value">${sessionMetrics.decisionCalls}</span><span class="metric-label">Decision calls</span></div>
     <div class="metric-item" title="Input + output tokens used by the generation model only -- decision-model calls aren't counted"><span class="metric-value">${sessionMetrics.inputTokens + sessionMetrics.outputTokens}</span><span class="metric-label">Generation tokens</span></div>
     <div class="metric-item" title="Average end-to-end time per query, including cache hits"><span class="metric-value">${avgLatency}ms</span><span class="metric-label">Avg latency</span></div>
-    <div class="metric-item" title="Queries answered from cache instead of re-running the pipeline"><span class="metric-value">${sessionMetrics.cacheHits}</span><span class="metric-label">Cache hits</span></div>
   `;
 }
 
@@ -366,6 +435,17 @@ function buildRelevanceStage(relevance) {
     .sort((a, b) => b.probability - a.probability)
     .map((r) => {
       const kept = r.kept;
+      // Kept despite scoring below the relevance threshold means this
+      // chunk was force-kept outside the normal per-chunk judgment (a
+      // document anchor, or a neighbor pulled in next to a high-scoring
+      // chunk) -- surfaced as "pinned" rather than a plain "kept" so it
+      // doesn't read as a scoring inconsistency.
+      const pinned = kept && r.probability < thresholds.relevance_threshold;
+      const flagClass = pinned ? "pinned" : kept ? "kept" : "dropped";
+      const flagText = pinned ? "pinned" : kept ? "kept" : "dropped";
+      const flagTitle = pinned
+        ? `Kept despite scoring ${r.probability.toFixed(2)}, below the relevance threshold (${thresholds.relevance_threshold.toFixed(2)}) — likely force-kept as a document anchor or neighbor-expansion chunk, not a relevance judgment.`
+        : "";
       const snippet = r.text.length > 90 ? r.text.slice(0, 90) + "…" : r.text;
       // escapeHtml() on chunk_id too: it's derived from the uploaded
       // filename, which is attacker-controllable -- never trust it raw
@@ -380,7 +460,7 @@ function buildRelevanceStage(relevance) {
               <div class="chunk-bar-fill ${kept ? "kept" : "dropped"}" style="width:${pct(r.probability)}"></div>
             </div>
             <span class="chunk-prob">${r.probability.toFixed(2)}</span>
-            <span class="chunk-flag ${kept ? "kept" : "dropped"}">${kept ? "kept" : "dropped"}</span>
+            <span class="chunk-flag ${flagClass}"${flagTitle ? ` title="${escapeHtml(flagTitle)}"` : ""}>${flagText}</span>
           </div>
           <div class="chunk-snippet">${escapeHtml(snippet)}</div>
         </div>`;
@@ -405,10 +485,10 @@ function buildSufficiencyStage(sufficiency) {
     </div>
     ${
       sufficiency.partial
-        ? `<div class="chunk-snippet" style="margin-left:0;margin-top:6px;">Context only partially covers the question — generation was allowed to answer what it can and flag the rest, instead of refusing outright.</div>`
+        ? `<div class="chunk-snippet" style="margin-top:8px;">Context only partially covers the question — generation was allowed to answer what it can and flag the rest, instead of refusing outright.</div>`
         : ""
     }
-    ${sufficiency.reason && !sufficiency.partial ? `<div class="chunk-snippet" style="margin-left:0;margin-top:6px;">${escapeHtml(sufficiency.reason)}</div>` : ""}
+    ${sufficiency.reason && !sufficiency.partial ? `<div class="chunk-snippet" style="margin-top:8px;">${escapeHtml(sufficiency.reason)}</div>` : ""}
   `;
 }
 
@@ -416,7 +496,7 @@ function buildGenerationStage(usage) {
   if (!usage || (!usage.input_tokens && !usage.output_tokens)) {
     return `<div class="stage-empty">No usage data reported by this backend.</div>`;
   }
-  return `<div class="chunk-snippet" style="margin-left:0;">input: ${usage.input_tokens} tokens · output: ${usage.output_tokens} tokens</div>`;
+  return `<div class="chunk-snippet">input: ${usage.input_tokens} tokens · output: ${usage.output_tokens} tokens</div>`;
 }
 
 function buildGroundingStage(grounding) {
@@ -436,7 +516,7 @@ function buildGroundingStage(grounding) {
     )
     .join("");
   return `
-    <div class="chunk-snippet" style="margin-left:0;margin-bottom:8px;">coverage: ${pct(grounding.coverage)} (needs ≥ ${pct(thresholds.grounding_min_coverage)})</div>
+    <div class="chunk-snippet" style="margin-bottom:8px;">coverage: ${pct(grounding.coverage)} (needs ≥ ${pct(thresholds.grounding_min_coverage)})</div>
     ${rows}
   `;
 }
@@ -446,8 +526,8 @@ function buildIntentStage(intent) {
     return `<div class="stage-empty">Not evaluated for this response.</div>`;
   }
   return `
-    <div class="chunk-snippet" style="margin-left:0;">action: ${escapeHtml(intent.action)} · p=${intent.probability.toFixed(2)}</div>
-    ${intent.reason ? `<div class="chunk-snippet" style="margin-left:0;margin-top:6px;">${escapeHtml(intent.reason)}</div>` : ""}
+    <div class="chunk-snippet">action: ${escapeHtml(intent.action)} · p=${intent.probability.toFixed(2)}</div>
+    ${intent.reason ? `<div class="chunk-snippet" style="margin-top:6px;">${escapeHtml(intent.reason)}</div>` : ""}
   `;
 }
 
@@ -456,8 +536,8 @@ function buildClarifyStage(clarify) {
     return `<div class="stage-empty">Not evaluated for this response.</div>`;
   }
   return `
-    <div class="chunk-snippet" style="margin-left:0;">needs clarification: ${clarify.needs_clarification ? "yes" : "no"} · p=${clarify.probability.toFixed(2)}</div>
-    ${clarify.reason ? `<div class="chunk-snippet" style="margin-left:0;margin-top:6px;">${escapeHtml(clarify.reason)}</div>` : ""}
+    <div class="chunk-snippet">needs clarification: ${clarify.needs_clarification ? "yes" : "no"} · p=${clarify.probability.toFixed(2)}</div>
+    ${clarify.reason ? `<div class="chunk-snippet" style="margin-top:6px;">${escapeHtml(clarify.reason)}</div>` : ""}
   `;
 }
 
@@ -466,9 +546,29 @@ function buildCaveatStage(caveat) {
     return `<div class="stage-empty">Not evaluated for this response.</div>`;
   }
   return `
-    <div class="chunk-snippet" style="margin-left:0;">has caveat: ${caveat.has_caveat ? "yes" : "no"} · p=${caveat.probability.toFixed(2)}</div>
-    ${caveat.reason ? `<div class="chunk-snippet" style="margin-left:0;margin-top:6px;">${escapeHtml(caveat.reason)}</div>` : ""}
+    <div class="chunk-snippet">has caveat: ${caveat.has_caveat ? "yes" : "no"} · p=${caveat.probability.toFixed(2)}</div>
+    ${caveat.reason ? `<div class="chunk-snippet" style="margin-top:6px;">${escapeHtml(caveat.reason)}</div>` : ""}
   `;
+}
+
+// A box citing exactly which chunks the grounding check traced each claim
+// back to, shown outside the trace toggle (always visible once an answer
+// is grounded) rather than buried a click away. Only renders when the
+// backend actually reported supporting chunk ids for at least one claim --
+// it stays empty rather than inventing a citation that wasn't made.
+function buildSupportedBy(report) {
+  if (!report.grounding || !report.grounding.claims) return "";
+  const ids = new Set();
+  report.grounding.claims.forEach((c) => (c.supporting_chunk_ids || []).forEach((id) => ids.add(id)));
+  if (!ids.size) return "";
+  const chunkMap = new Map((report.relevance || []).map((r) => [r.chunk_id, r.text]));
+  const parts = [...ids].map((id) => {
+    const label = escapeHtml(chunkShortLabel(id));
+    const text = chunkMap.get(id);
+    const snippet = text ? `: "${escapeHtml(text.length > 140 ? text.slice(0, 140) + "…" : text)}"` : "";
+    return `${label}${snippet}`;
+  });
+  return `<span class="supported-by-label">SUPPORTED BY</span>${parts.join(" · ")}`;
 }
 
 function renderTracePanel(container, report) {
@@ -528,11 +628,15 @@ function renderTracePanel(container, report) {
 }
 
 function finalizeMessage(container, report) {
+  const bubble = container.querySelector(".msg-bubble");
   const badge = container.querySelector(".action-badge");
   const textEl = container.querySelector(".msg-text");
+  const supportedByEl = container.querySelector(".supported-by");
   badge.textContent = ACTION_LABELS[report.action] || report.action;
   badge.classList.add("show", report.action);
+  bubble.classList.toggle("verdict-good", report.action === "answered" || report.action === "answered_with_caveat");
   textEl.textContent = report.answer;
+  if (supportedByEl) supportedByEl.innerHTML = buildSupportedBy(report);
   renderTracePanel(container, report);
   chatEl.scrollTop = chatEl.scrollHeight;
 }
@@ -585,15 +689,18 @@ async function streamChat(query, onEvent) {
 }
 
 async function sendQuery(query) {
+  const emptyState = document.getElementById("empty-state");
+  if (emptyState) emptyState.remove();
+
   addUserMessage(query);
   const container = addAssistantMessage();
-  sideStepperEl.innerHTML = stepperHtml();
+  renderSideTimelineIdle();
 
-  // Mirrors every stepper update into the sidebar too, so the current
-  // stage is visible without scrolling back up to the message bubble.
-  const setStage = (key, state, ms) => {
+  // Mirrors every stepper update into the sidebar timeline too, so the
+  // current stage is visible without scrolling back up to the message.
+  const setStage = (key, state, ms, resultText) => {
     setStageState(container, key, state, ms);
-    setStageState(sideStepperEl, key, state, ms);
+    setSideTimelineStage(key, state, ms, resultText);
   };
   setStage("intent", "active");
 
@@ -603,7 +710,7 @@ async function sendQuery(query) {
   let bubbleCleared = false;
   const clearBubble = () => {
     if (!bubbleCleared) {
-      container.querySelector(".msg-bubble").innerHTML = `<div class="action-badge"></div><div class="msg-text"></div>`;
+      container.querySelector(".msg-bubble").innerHTML = `<div class="action-badge"></div><div class="msg-text"></div><div class="supported-by"></div>`;
       bubbleCleared = true;
     }
   };
@@ -628,7 +735,6 @@ async function sendQuery(query) {
       if (event === "cached") {
         const cacheHtml = `<span class="cache-badge">⚡ served from cache</span>`;
         container.querySelector(".stepper").innerHTML = cacheHtml;
-        sideStepperEl.innerHTML = cacheHtml;
         clearBubble();
         finalizeMessage(container, data);
         recordMetrics(data, data.total_elapsed_ms, true);
@@ -636,7 +742,7 @@ async function sendQuery(query) {
         return;
       }
       if (STAGES.some((s) => s.key === event)) {
-        setStage(event, "done", data.elapsed_ms);
+        setStage(event, "done", data.elapsed_ms, stageLogDetail(event, data));
         logLine("ok", `<b>${event}</b> ${stageLogDetail(event, data)} (${data.elapsed_ms}ms)`);
 
         // Mark the next stage "active" (pulsing) so the stepper visibly
@@ -742,7 +848,18 @@ function renderCompareColumn(colEl, data) {
       <div class="trace-panel"></div>
     </div>
   `;
-  colEl.querySelector(".compare-card-raw .compare-card-text").textContent = data.raw.answer;
+  const rawTextEl = colEl.querySelector(".compare-card-raw .compare-card-text");
+  rawTextEl.textContent = data.raw.answer;
+  // A raw (guard-off) answer sometimes leaks unrendered LaTeX delimiters
+  // straight from the model -- flagged rather than left to read as
+  // garbled prose, without altering the backend's actual output.
+  if (LATEX_RE.test(data.raw.answer || "")) {
+    rawTextEl.classList.add("latex-raw");
+    const note = document.createElement("div");
+    note.className = "compare-latex-note";
+    note.textContent = "Unrendered LaTeX leaked into the raw output";
+    colEl.querySelector(".compare-card-raw").appendChild(note);
+  }
   colEl.querySelector(".compare-card-jev .compare-card-text").textContent = jev.answer;
   // renderTracePanel() only needs a container with a .trace-panel and a
   // .trace-toggle child -- the same function single-provider mode uses.
@@ -765,12 +882,14 @@ function renderCompareSummary(providers) {
     })
     .join("");
   compareSummaryEl.innerHTML = `
-    <table class="compare-summary-table">
-      <thead>
-        <tr><th>Provider</th><th>JEV decision</th><th>Grounding coverage</th><th>Sufficiency p</th></tr>
-      </thead>
-      <tbody>${rows}</tbody>
-    </table>
+    <div class="compare-summary-table-wrap">
+      <table class="compare-summary-table">
+        <thead>
+          <tr><th>Provider</th><th>JEV decision</th><th>Grounding coverage</th><th>Sufficiency p</th></tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
   `;
 }
 

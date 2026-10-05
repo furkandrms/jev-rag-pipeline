@@ -4,451 +4,383 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="description" content="A real RAG system guarded end-to-end by rag-guard: a typed-decision layer that catches insufficient context and ungrounded answers before they reach you." />
-  <meta name="theme-color" content="#0b0d12" />
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b0d12'/%3E%3Ccircle cx='16' cy='16' r='9' fill='none' stroke='%237c9fff' stroke-width='3'/%3E%3C/svg%3E" />
-  <title>rag-guard · a typed-decision layer for RAG, demonstrated live</title>
+  <meta name="theme-color" content="#0a0c11" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 28 28'%3E%3Crect width='28' height='28' rx='8' fill='%23161b24'/%3E%3Cpath d='M14 6l6.5 2.5v5.2c0 3.6-2.6 6.3-6.5 8.3-3.9-2-6.5-4.7-6.5-8.3V8.5L14 6z' stroke='%237f95ff' stroke-width='1.6' fill='none'/%3E%3C/svg%3E" />
+  <title>rag-guard &middot; a typed-decision layer for RAG, demonstrated live</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet" />
   <style>
     :root {
-      --bg: #0b0d12;
-      --bg-elevated: #12151c;
-      --bg-card: #171a23;
-      --border: #262b38;
-      --text: #e6e8ee;
-      --text-dim: #8b93a7;
-      --accent: #7c9fff;
-      --accent-dim: #3a4a7a;
-      --green: #4ade80;
-      --green-dim: rgba(74, 222, 128, 0.14);
-      --yellow: #fbbf24;
-      --yellow-dim: rgba(251, 191, 36, 0.14);
-      --orange: #fb923c;
-      --orange-dim: rgba(251, 146, 60, 0.14);
-      --red: #f87171;
-      --red-dim: rgba(248, 113, 113, 0.12);
-      --radius: 14px;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+      --bg: #0a0c11;
+      --bg-alt: #0c0f15;
+      --surface: #11151c;
+      --surface-2: #161b24;
+      --line: #232a36;
+      --line-strong: #2d3646;
+      --text: #e8ebf2;
+      --text-muted: #9ba4b5;
+      --text-dim: #8a93a6;
+      --accent: #7f95ff;
+      --accent-text: #9db0ff;
+      --good: #5ad19a;
+      --good-bg: #0f1d18;
+      --good-border: #25503d;
+      --warn: #f0b45a;
+      --bad: #ff9a9a;
+      --neutral-bar: #4a5366;
+      font-family: "Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     }
     * { box-sizing: border-box; }
     html, body { margin: 0; }
-    body {
-      background: radial-gradient(1200px 600px at 50% -10%, #151a27 0%, var(--bg) 55%);
-      color: var(--text);
-      line-height: 1.55;
-    }
-    a { color: var(--accent); text-decoration: none; }
-    a:hover { text-decoration: underline; }
-    .wrap { max-width: 980px; margin: 0 auto; padding: 0 clamp(16px, 4vw, 32px); }
+    body { background: var(--bg); color: var(--text); line-height: 1.5; }
+    a { color: var(--accent-text); text-decoration: none; }
+    a:hover { color: #c3cffe; }
+    code, .mono { font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace; }
+    :focus-visible { outline: 2px solid var(--accent-text); outline-offset: 3px; border-radius: 6px; }
+    @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 
-    nav.top {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 18px 0;
-      border-bottom: 1px solid var(--border);
-    }
-    nav.top .wrap { width: 100%; display: flex; align-items: center; justify-content: space-between; }
-    .brand { display: flex; align-items: center; gap: 10px; font-weight: 600; }
-    .brand img { width: 28px; height: 28px; border-radius: 7px; }
-    .cta {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      padding: 9px 16px;
-      border-radius: 999px;
-      background: var(--accent);
-      color: #0b0d12;
-      font-weight: 600;
-      font-size: 0.92rem;
-    }
-    .cta:hover { text-decoration: none; filter: brightness(1.08); }
-    .cta.ghost {
-      background: transparent;
-      color: var(--text);
-      border: 1px solid var(--border);
-    }
+    .wrap { max-width: 1120px; margin: 0 auto; padding: 0 24px; }
 
-    header.hero { padding: clamp(48px, 9vw, 96px) 0 clamp(32px, 6vw, 56px); text-align: center; }
+    .btn {
+      display: inline-flex; align-items: center; gap: 8px;
+      min-height: 44px; padding: 0 20px; border-radius: 10px;
+      font-weight: 600; font-size: 15px; text-decoration: none;
+      transition: transform 0.15s, background 0.15s, border-color 0.15s, color 0.15s;
+      border: none; cursor: pointer;
+    }
+    .btn-p { background: var(--accent); color: #0a0c11; }
+    .btn-p:hover { background: #9aabff; color: #0a0c11; transform: translateY(-1px); }
+    .btn-s { border: 1px solid var(--line-strong); color: var(--text); background: transparent; }
+    .btn-s:hover { border-color: var(--accent); color: #fff; }
+
+    .card { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; }
+    .row { transition: background 0.15s; }
+    .row:hover { background: #141922; }
+
+    /* --- Nav --- */
+    nav.top { position: relative; border-bottom: 1px solid #1b212b; }
+    nav.top .wrap { padding: 12px 24px; display: flex; flex-wrap: wrap; align-items: center; gap: 12px 32px; }
+    .brand { display: flex; align-items: center; gap: 12px; color: #fff; font-weight: 700; font-size: 22px; margin-right: auto; }
+    .brand img { width: 48px; height: 48px; border-radius: 11px; }
+    .nav-link { color: var(--text-muted); font-size: 14px; padding: 12px 4px; }
+    .nav-link:hover { color: #fff; }
+    .nav-cta { min-height: 40px; padding: 0 16px; font-size: 14px; }
+
+    /* --- Hero --- */
+    .hero { padding: 88px 0 72px; display: flex; flex-wrap: wrap; gap: 56px; align-items: center; }
+    .hero-copy { flex: 1 1 440px; min-width: 0; }
     .eyebrow {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      font-size: 0.78rem;
-      letter-spacing: 0.04em;
-      text-transform: uppercase;
-      color: var(--accent);
-      background: var(--accent-dim);
-      border-radius: 999px;
-      padding: 6px 14px;
-      margin-bottom: 20px;
+      display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px;
+      border: 1px solid var(--line-strong); border-radius: 999px;
+      font-family: "Geist Mono", monospace; font-size: 12px; color: var(--text-muted); letter-spacing: 0.04em;
     }
-    h1 {
-      font-size: clamp(2rem, 5vw, 3.1rem);
-      line-height: 1.1;
-      margin: 0 0 18px;
-      letter-spacing: -0.01em;
-    }
-    h1 .accent { color: var(--accent); }
-    .lede {
-      max-width: 640px;
-      margin: 0 auto 32px;
-      color: var(--text-dim);
-      font-size: 1.1rem;
-    }
-    .hero-actions { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
-    .hero-actions .cta { font-size: 1rem; padding: 12px 24px; }
+    .eyebrow .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--good); }
+    h1 { margin: 24px 0 0; font-size: clamp(32px, 5vw, 56px); line-height: 1.05; letter-spacing: -0.03em; font-weight: 700; }
+    h1 .accent { color: var(--accent-text); }
+    .lede { margin: 24px 0 0; font-size: 18px; line-height: 1.6; color: #aab2c2; max-width: 520px; }
+    .hero-actions { margin-top: 32px; display: flex; flex-wrap: wrap; gap: 12px; }
+    .hero-facts { margin-top: 40px; display: flex; flex-wrap: wrap; gap: 12px 32px; font-size: 14px; color: var(--text-muted); }
+    .hero-facts b { color: var(--text); font-weight: 600; }
 
-    section { padding: clamp(36px, 7vw, 64px) 0; }
-    section + section { border-top: 1px solid var(--border); }
-    h2 {
-      font-size: clamp(1.4rem, 3vw, 1.8rem);
-      margin: 0 0 10px;
-    }
-    .section-sub { color: var(--text-dim); max-width: 640px; margin: 0 0 32px; }
+    .verdict-card { flex: 1 1 400px; min-width: 0; padding: 20px; box-shadow: 0 30px 80px -30px rgba(127, 149, 255, 0.25); }
+    .verdict-meta { display: flex; justify-content: space-between; align-items: center; font-family: "Geist Mono", monospace; font-size: 12px; color: var(--text-dim); margin-bottom: 16px; }
+    .verdict-query { background: #1b2230; border-radius: 12px 12px 4px 12px; padding: 12px 14px; font-size: 15px; margin-left: 48px; }
+    .verdict-answer { margin-top: 12px; border: 1px solid var(--good-border); background: var(--good-bg); border-radius: 12px; padding: 16px; }
+    .verdict-tag { display: flex; align-items: center; gap: 8px; font-family: "Geist Mono", monospace; font-size: 12px; color: var(--good); letter-spacing: 0.06em; }
+    .verdict-tag .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--good); }
+    .verdict-answer p { margin: 10px 0 0; font-size: 16px; line-height: 1.5; }
+    .verdict-stages { margin-top: 16px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; font-family: "Geist Mono", monospace; font-size: 11px; color: var(--text-muted); }
+    .verdict-stages > div { border: 1px solid var(--line); border-radius: 8px; padding: 8px; }
+    .verdict-stages > div > span { display: block; color: var(--text); margin-bottom: 2px; }
 
-    .problem-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-      gap: 16px;
-    }
-    .problem-card {
-      background: var(--bg-card);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      padding: 20px;
-    }
-    .problem-card .tag {
-      display: inline-block;
-      font-size: 0.72rem;
-      font-weight: 700;
-      letter-spacing: 0.03em;
-      text-transform: uppercase;
-      color: var(--red);
-      background: var(--red-dim);
-      border-radius: 6px;
-      padding: 3px 8px;
-      margin-bottom: 10px;
-    }
-    .problem-card p { margin: 0; color: var(--text-dim); font-size: 0.93rem; }
+    section { border-top: 1px solid #1b212b; }
+    section.alt { background: var(--bg-alt); }
+    .section-inner { padding: 88px 0; }
+    .eyebrow-label { font-family: "Geist Mono", monospace; font-size: 12px; letter-spacing: 0.08em; color: var(--text-dim); }
+    h2 { margin: 12px 0 0; font-size: clamp(26px, 4vw, 36px); letter-spacing: -0.02em; line-height: 1.15; max-width: 720px; }
+    .section-sub { margin: 16px 0 0; font-size: 17px; line-height: 1.6; color: #aab2c2; max-width: 680px; }
 
-    .pipeline {
-      display: flex;
-      flex-direction: column;
-      gap: 0;
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      overflow: hidden;
-      background: var(--bg-card);
-    }
-    .stage {
-      display: grid;
-      grid-template-columns: 44px 1fr auto;
-      gap: 16px;
-      align-items: start;
-      padding: 18px 20px;
-      border-bottom: 1px solid var(--border);
-    }
-    .stage:last-child { border-bottom: none; }
-    .stage-num {
-      width: 32px;
-      height: 32px;
-      border-radius: 50%;
-      border: 1px solid var(--accent-dim);
-      color: var(--accent);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 0.85rem;
-      font-weight: 700;
-    }
-    .stage-name { font-weight: 600; margin-bottom: 4px; }
-    .stage-desc { color: var(--text-dim); font-size: 0.92rem; }
-    .stage-outcome {
-      font-size: 0.74rem;
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      color: var(--text-dim);
-      background: var(--bg-elevated);
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 4px 8px;
-      white-space: nowrap;
-      align-self: center;
-    }
+    /* --- Problem --- */
+    .problem-grid { margin-top: 40px; display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+    .problem-card { padding: 24px; }
+    .problem-tag { font-family: "Geist Mono", monospace; font-size: 12px; letter-spacing: 0.06em; color: var(--bad); }
+    .problem-card p { margin: 12px 0 0; font-size: 16px; line-height: 1.55; color: #c5ccda; }
 
-    .two-col {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-      gap: 20px;
-    }
-    .mode-card {
-      background: var(--bg-card);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      padding: 24px;
-    }
-    .mode-card h3 { margin: 0 0 8px; font-size: 1.05rem; }
-    .mode-card p { color: var(--text-dim); font-size: 0.93rem; margin: 0 0 14px; }
-    .mode-card ul { margin: 0; padding-left: 18px; color: var(--text-dim); font-size: 0.9rem; }
-    .mode-card li { margin-bottom: 6px; }
+    /* --- Pipeline --- */
+    .pipeline-grid { margin-top: 40px; display: flex; flex-wrap: wrap; gap: 24px; }
+    .pipeline-col-main { flex: 1 1 640px; min-width: 0; }
+    .pipeline-col-side { flex: 1 1 640px; min-width: 0; display: flex; flex-direction: column; gap: 24px; }
+    .panel-head { padding: 12px 24px; border-bottom: 1px solid var(--line); font-family: "Geist Mono", monospace; font-size: 11px; letter-spacing: 0.08em; color: var(--text-dim); }
+    .panel-head.accent { border-bottom-color: #263066; color: var(--accent-text); }
+    .stage-row { display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: center; padding: 18px 24px; border-bottom: 1px solid #1b212b; }
+    .stage-row:last-child { border-bottom: none; }
+    .stage-num { width: 28px; height: 28px; border: 1px solid var(--line-strong); border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 13px; color: var(--accent-text); flex-shrink: 0; }
+    .stage-num.accent { border-color: #5a6ad0; }
+    .stage-body { flex: 1 1 320px; min-width: 0; }
+    .stage-name { font-weight: 600; }
+    .stage-desc { font-size: 14px; line-height: 1.5; color: var(--text-muted); margin-top: 2px; }
+    .stage-out { font-family: "Geist Mono", monospace; font-size: 12px; color: #b8c0d0; background: var(--surface-2); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; white-space: nowrap; }
+    .generation-panel .stage-out { color: #c7d0ee; background: #161b3a; border-color: #263066; }
+    .generation-panel { border-color: #34407a; background: #10142a; }
 
-    .badge-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
-    .badge-row span {
-      font-size: 0.72rem;
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 3px 8px;
-      color: var(--text-dim);
-    }
+    /* --- Modes --- */
+    .modes-grid { margin-top: 40px; display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
+    .mode-card { padding: 28px; }
+    .mode-card h3 { margin: 0; font-size: 20px; font-weight: 600; }
+    .mode-card > p { margin: 8px 0 20px; font-size: 15px; line-height: 1.55; color: var(--text-muted); }
+    .mode-card ul { margin: 20px 0 0; padding-left: 18px; font-size: 14px; line-height: 1.7; color: #aab2c2; }
+    .mini-bars { display: flex; flex-direction: column; gap: 8px; font-family: "Geist Mono", monospace; font-size: 11px; color: var(--text-muted); }
+    .mini-bars .bar-row { display: flex; align-items: center; gap: 10px; }
+    .mini-bars .bar-label { width: 56px; flex-shrink: 0; }
+    .mini-bars .bar-track { flex: 1; height: 6px; background: #1b212b; border-radius: 3px; }
+    .mini-bars .bar-fill { display: block; height: 6px; border-radius: 3px; background: var(--good); }
+    .mini-bars .bar-fill.dim { background: var(--neutral-bar); }
+    .mini-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 12px; }
+    .mini-grid > div { border-radius: 8px; padding: 10px; }
+    .mini-grid .raw { border: 1px dashed var(--line-strong); color: var(--text-muted); }
+    .mini-grid .guarded { border: 1px solid #34407a; background: #10142a; color: #c7d0ee; }
+    .mini-grid .guarded span { color: #8fa0f0; }
+    .mini-grid div span { display: block; color: #6f788b; }
 
-    .library-callout {
-      display: grid;
-      grid-template-columns: 1fr;
-      gap: 20px;
+    /* --- Install --- */
+    pre.install {
+      margin: 32px 0 0; padding: 24px; background: var(--bg); border: 1px solid var(--line); border-radius: 14px;
+      overflow-x: auto; font-family: "Geist Mono", monospace; font-size: 14px; line-height: 1.7; color: #c5ccda;
+      white-space: pre;
     }
-    .library-callout .code {
-      background: var(--bg-elevated);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      padding: 18px 20px;
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      font-size: 0.86rem;
-      color: var(--text-dim);
-      overflow-x: auto;
-    }
-    .library-callout .code .k { color: var(--accent); }
-    .library-callout .code .s { color: var(--green); }
+    pre.install .k { color: var(--accent-text); }
+    pre.install .s { color: #7fd9a8; }
+    .decision-pills { display: flex; flex-wrap: wrap; gap: 8px; }
+    .decision-pills span { padding: 8px 14px; border: 1px solid var(--line-strong); border-radius: 999px; font-size: 14px; color: #c5ccda; }
+    .decision-pills span b { color: #7c8599; font-weight: 400; }
 
-    .backend-list { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 16px; }
-    .backend-list span {
-      font-size: 0.82rem;
-      border: 1px solid var(--border);
-      background: var(--bg-elevated);
-      border-radius: 999px;
-      padding: 6px 14px;
-      color: var(--text-dim);
-    }
-
-    footer {
-      padding: 32px 0 48px;
-      color: var(--text-dim);
-      font-size: 0.86rem;
-      display: flex;
-      justify-content: space-between;
-      flex-wrap: wrap;
-      gap: 12px;
-    }
-    footer .links { display: flex; gap: 18px; flex-wrap: wrap; }
+    /* --- CTA + footer --- */
+    .cta-band { padding: 80px 0; text-align: center; }
+    .cta-band h2 { margin: 0 auto; }
+    .cta-band .section-sub { margin: 16px auto 0; text-align: center; }
+    .cta-band .btn { margin-top: 28px; }
+    footer { border-top: 1px solid #1b212b; }
+    footer .wrap { padding: 24px; display: flex; flex-wrap: wrap; gap: 12px 24px; justify-content: space-between; font-size: 14px; color: var(--text-dim); }
+    footer .links { display: flex; flex-wrap: wrap; gap: 8px 24px; }
 
     @media (max-width: 560px) {
-      .stage { grid-template-columns: 36px 1fr; }
-      .stage-outcome { grid-column: 2 / 3; margin-top: 8px; }
+      .nav-link { display: none; }
+      .verdict-stages { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     }
   </style>
 </head>
 <body>
   <nav class="top">
     <div class="wrap">
-      <div class="brand">
-        <img src="/static/logo.png" alt="" />
-        <span>rag-guard, demonstrated live</span>
-      </div>
-      <a class="cta" href="/app">Open the app →</a>
+      <a class="brand" href="/">
+        <img src="/static/logo.png?v=2" alt="" />
+        rag-guard
+      </a>
+      <a class="nav-link" href="#pipeline">Pipeline</a>
+      <a class="nav-link" href="#modes">Two modes</a>
+      <a class="nav-link" href="#install">Install</a>
+      <a class="btn btn-p nav-cta" href="/app">Open the app</a>
     </div>
   </nav>
 
-  <header class="hero">
-    <div class="wrap">
-      <span class="eyebrow">Live demo · real document, real LLM, real decisions</span>
-      <h1>An answer you can <span class="accent">verify</span>,<br />not just one you have to trust.</h1>
-      <p class="lede">
-        This is a working RAG chat app wrapped end-to-end by
-        <strong>rag-guard</strong> (internally "JEV"): a typed-decision
-        layer that checks whether retrieval actually found something
-        relevant, whether there's enough of it to answer confidently, and
-        whether the model's answer is actually supported by what was
-        retrieved -- before you ever see a confident-sounding guess.
-      </p>
-      <div class="hero-actions">
-        <a class="cta" href="/app">Try it on your own document →</a>
-        <a class="cta ghost" href="https://github.com/furkandrms/jev-rag-guard">View rag-guard on GitHub</a>
+  <section>
+    <div class="wrap hero">
+      <div class="hero-copy">
+        <span class="eyebrow"><span class="dot"></span>LIVE DEMO &middot; REAL DOCUMENT &middot; REAL LLM</span>
+        <h1>An answer you can <span class="accent">verify</span>, not one you have to trust.</h1>
+        <p class="lede">
+          rag-guard is a typed-decision layer for RAG. Before you see an
+          answer, it checks that retrieval found something relevant, that
+          there is enough of it, and that every claim is backed by the
+          source.
+        </p>
+        <div class="hero-actions">
+          <a class="btn btn-p" href="/app">Try it on your own document <span aria-hidden="true">&rarr;</span></a>
+          <a class="btn btn-s" href="https://github.com/furkandrms/jev-rag-guard">View on GitHub</a>
+        </div>
+        <div class="hero-facts">
+          <span><b>7</b> bounded decisions</span>
+          <span><b>1</b> LLM call</span>
+          <span><b>100%</b> logged and auditable</span>
+        </div>
+      </div>
+
+      <div class="card verdict-card">
+        <div class="verdict-meta"><span>attention_is_all_you_need.pdf</span><span>63 chunks</span></div>
+        <div class="verdict-query">What BLEU score did the Transformer reach on English-to-German?</div>
+        <div class="verdict-answer">
+          <div class="verdict-tag"><span class="dot"></span>ANSWERED &middot; 1/1 CLAIMS SUPPORTED</div>
+          <p>The Transformer reached a BLEU score of <b>28.4</b> on the WMT 2014 English-to-German translation task.</p>
+        </div>
+        <div class="verdict-stages">
+          <div><span>Intent</span>p 1.00</div>
+          <div><span>Relevance</span>8/14 kept</div>
+          <div><span>Sufficiency</span>p 0.97</div>
+          <div><span>Caveat</span>p 0.48</div>
+        </div>
       </div>
     </div>
-  </header>
+  </section>
 
   <section>
-    <div class="wrap">
-      <h2>The problem this guards against</h2>
-      <p class="section-sub">
-        Vector search finds passages that are embedding-close to a query --
-        that's not the same thing as "this passage answers the query" or
-        "the model's answer is actually backed by it." Most RAG
-        hallucination isn't the model lying; it's being handed a context
-        that doesn't contain the answer, and doing its best anyway.
-      </p>
+    <div class="wrap section-inner">
+      <div class="eyebrow-label">THE PROBLEM</div>
+      <h2>Most RAG hallucination isn't the model lying. It's an answer built on the wrong context.</h2>
+      <p class="section-sub">Vector search finds passages that are close to a query in embedding space. That is not the same as passages that answer it, or an answer the passages actually support.</p>
       <div class="problem-grid">
-        <div class="problem-card">
-          <span class="tag">Silent gap</span>
-          <p>Retrieval misses the one chunk that actually answers the question, and nothing downstream knows to say so.</p>
+        <div class="card problem-card">
+          <div class="problem-tag">SILENT GAP</div>
+          <p>Retrieval misses the one chunk that answers the question, and nothing downstream knows to say so.</p>
         </div>
-        <div class="problem-card">
-          <span class="tag">Confident guess</span>
-          <p>The context is too thin to answer, but the model answers anyway -- fluently, and wrong.</p>
+        <div class="card problem-card">
+          <div class="problem-tag">CONFIDENT GUESS</div>
+          <p>The context is too thin, but the model answers anyway: fluently, and wrong.</p>
         </div>
-        <div class="problem-card">
-          <span class="tag">Unverifiable claim</span>
-          <p>The final answer reads fine on its own; you have no way to tell which parts of it the source text actually supports.</p>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <section>
-    <div class="wrap">
-      <h2>How rag-guard decides</h2>
-      <p class="section-sub">
-        Every query in this app runs through the same seven-stage pipeline.
-        Each stage is a single bounded, calibrated judgment -- not a
-        free-form model call -- so it's cheap, fast, and auditable: a
-        probability you can threshold and log, not prose you have to
-        parse. The app's own "Why this answer?" trace shows you exactly
-        which stage decided what, for every reply.
-      </p>
-      <div class="pipeline">
-        <div class="stage">
-          <div class="stage-num">1</div>
-          <div>
-            <div class="stage-name">Intent</div>
-            <div class="stage-desc">Should this query even reach retrieval, or does it need to be escalated to a human or refused outright?</div>
-          </div>
-          <div class="stage-outcome">proceed / escalate / refuse</div>
-        </div>
-        <div class="stage">
-          <div class="stage-num">2</div>
-          <div>
-            <div class="stage-name">Relevance</div>
-            <div class="stage-desc">Does this retrieved passage actually help answer the query? Drops noise before it reaches anything else.</div>
-          </div>
-          <div class="stage-outcome">kept / dropped per chunk</div>
-        </div>
-        <div class="stage">
-          <div class="stage-num">3</div>
-          <div>
-            <div class="stage-name">Clarify</div>
-            <div class="stage-desc">Is the query itself too ambiguous to answer from what was kept, regardless of how good the context is?</div>
-          </div>
-          <div class="stage-outcome">clarify</div>
-        </div>
-        <div class="stage">
-          <div class="stage-num">4</div>
-          <div>
-            <div class="stage-name">Sufficiency</div>
-            <div class="stage-desc">Is the kept context enough to answer confidently -- fully, partially, or not at all? A "no" here skips generation entirely.</div>
-          </div>
-          <div class="stage-outcome">insufficient_context</div>
-        </div>
-        <div class="stage">
-          <div class="stage-num">5</div>
-          <div>
-            <div class="stage-name">Generate</div>
-            <div class="stage-desc">Only now does the LLM actually run, against exactly the chunks that survived relevance filtering.</div>
-          </div>
-          <div class="stage-outcome">1 LLM call</div>
-        </div>
-        <div class="stage">
-          <div class="stage-num">6</div>
-          <div>
-            <div class="stage-name">Grounding</div>
-            <div class="stage-desc">Split the answer into claims and check each one against the retrieved context. Flags drift instead of hiding it.</div>
-          </div>
-          <div class="stage-outcome">ungrounded_answer_flagged</div>
-        </div>
-        <div class="stage">
-          <div class="stage-num">7</div>
-          <div>
-            <div class="stage-name">Caveat</div>
-            <div class="stage-desc">Even a fully grounded answer can need a caveat -- partial coverage, an edge case the source text itself hedges on.</div>
-          </div>
-          <div class="stage-outcome">answered_with_caveat</div>
+        <div class="card problem-card">
+          <div class="problem-tag">UNVERIFIABLE CLAIM</div>
+          <p>The answer reads fine, but you can't tell which parts the source text supports.</p>
         </div>
       </div>
     </div>
   </section>
 
-  <section>
-    <div class="wrap">
-      <h2>Two ways to see it work</h2>
-      <p class="section-sub">
-        Upload any <code>.txt</code>, <code>.md</code>, or <code>.pdf</code> --
-        there's no pre-built demo corpus here on purpose. The point is
-        proving this works on a document neither rag-guard nor the model
-        has ever seen.
-      </p>
-      <div class="two-col">
-        <div class="mode-card">
+  <section id="pipeline" class="alt">
+    <div class="wrap section-inner">
+      <div class="eyebrow-label">HOW IT DECIDES</div>
+      <h2>Seven calibrated judgments. Four of them run before the LLM does.</h2>
+      <p class="section-sub">Each stage returns a probability you can threshold and log, not prose you have to parse. A "no" at any gate stops the pipeline before a guess is generated.</p>
+
+      <div class="pipeline-grid">
+        <div class="card pipeline-col-main">
+          <div class="panel-head">GATES &middot; BEFORE GENERATION</div>
+          <div class="row stage-row">
+            <span class="stage-num">1</span>
+            <div class="stage-body"><div class="stage-name">Intent</div><div class="stage-desc">Should this query reach retrieval, or be escalated to a human or refused outright?</div></div>
+            <code class="stage-out">proceed / escalate / refuse</code>
+          </div>
+          <div class="row stage-row">
+            <span class="stage-num">2</span>
+            <div class="stage-body"><div class="stage-name">Relevance</div><div class="stage-desc">Does each retrieved passage help answer the query? Drops noise early.</div></div>
+            <code class="stage-out">kept / dropped per chunk</code>
+          </div>
+          <div class="row stage-row">
+            <span class="stage-num">3</span>
+            <div class="stage-body"><div class="stage-name">Clarify</div><div class="stage-desc">Is the query too ambiguous to answer, however good the context is?</div></div>
+            <code class="stage-out">clarify</code>
+          </div>
+          <div class="row stage-row">
+            <span class="stage-num">4</span>
+            <div class="stage-body"><div class="stage-name">Sufficiency</div><div class="stage-desc">Is the kept context enough: fully, partially, or not at all? A "no" skips generation.</div></div>
+            <code class="stage-out">insufficient_context</code>
+          </div>
+        </div>
+
+        <div class="pipeline-col-side">
+          <div class="card generation-panel">
+            <div class="panel-head accent">GENERATION &middot; ONE LLM CALL</div>
+            <div class="row stage-row">
+              <span class="stage-num accent">5</span>
+              <div class="stage-body"><div class="stage-name">Generate</div><div class="stage-desc" style="color:#a7b0cc">Runs only against the chunks that survived relevance filtering.</div></div>
+              <code class="stage-out">1 LLM call</code>
+            </div>
+          </div>
+          <div class="card">
+            <div class="panel-head">CHECKS &middot; AFTER GENERATION</div>
+            <div class="row stage-row">
+              <span class="stage-num">6</span>
+              <div class="stage-body"><div class="stage-name">Grounding</div><div class="stage-desc">Splits the answer into claims and checks each against the context. Flags drift.</div></div>
+              <code class="stage-out">ungrounded_answer_flagged</code>
+            </div>
+            <div class="row stage-row">
+              <span class="stage-num">7</span>
+              <div class="stage-body"><div class="stage-name">Caveat</div><div class="stage-desc">Even a grounded answer may need a caveat: partial coverage, or an edge the source hedges on.</div></div>
+              <code class="stage-out">answered_with_caveat</code>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="modes">
+    <div class="wrap section-inner">
+      <div class="eyebrow-label">TWO WAYS TO SEE IT WORK</div>
+      <h2>Bring a document neither rag-guard nor the model has seen.</h2>
+      <p class="section-sub">There is no pre-built demo corpus, on purpose. Upload a .txt, .md or .pdf.</p>
+      <div class="modes-grid">
+        <div class="card mode-card">
           <h3>Single provider</h3>
-          <p>Chat normally, with every reply backed by a visible reasoning trace.</p>
+          <p>Chat normally. Every reply carries a visible reasoning trace.</p>
+          <div class="mini-bars">
+            <div class="bar-row"><span class="bar-label">Chunk 1</span><span class="bar-track"><span class="bar-fill" style="width:99%"></span></span><span>0.99</span></div>
+            <div class="bar-row"><span class="bar-label">Chunk 33</span><span class="bar-track"><span class="bar-fill" style="width:95%"></span></span><span>0.95</span></div>
+            <div class="bar-row"><span class="bar-label">Chunk 35</span><span class="bar-track"><span class="bar-fill dim" style="width:20%"></span></span><span>0.20</span></div>
+          </div>
           <ul>
-            <li>Which chunks were kept vs. dropped, and at what probability</li>
-            <li>The sufficiency gate's probability against its threshold</li>
-            <li>A per-claim grounding breakdown -- supported / unsupported</li>
+            <li>Which chunks were kept or dropped, and at what probability</li>
+            <li>The sufficiency gate against its threshold</li>
+            <li>A per-claim grounding breakdown</li>
           </ul>
         </div>
-        <div class="mode-card">
+        <div class="card mode-card">
           <h3>Compare mode</h3>
-          <p>Run the same question through two embedding providers at once, to see retrieval quality differences directly instead of taking them on faith.</p>
+          <p>Run one question through two embedding providers at once.</p>
+          <div class="mini-grid">
+            <div class="raw">Raw answer<span>guard off</span></div>
+            <div class="raw">Raw answer<span>guard off</span></div>
+            <div class="guarded">Guarded<span>OpenAI</span></div>
+            <div class="guarded">Guarded<span>Google</span></div>
+          </div>
           <ul>
-            <li>OpenAI <code>text-embedding-3-small</code> vs. Google <code>gemini-embedding-001</code></li>
-            <li>Raw answer (guard off) next to the JEV-protected answer, per provider</li>
-            <li>Same chunks, same thresholds, same generation model -- only retrieval differs</li>
+            <li>text-embedding-3-small vs gemini-embedding-001</li>
+            <li>Same chunks, thresholds and generator: only retrieval differs</li>
           </ul>
         </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="install" class="alt">
+    <div class="wrap section-inner">
+      <div class="eyebrow-label">A REAL DEPENDENCY</div>
+      <h2>Installed over pip, pinned to a commit. Not embedded logic.</h2>
+      <p class="section-sub">This app depends on rag-guard like any other project would, to prove the published package behaves as its docs and tests claim.</p>
+      <pre class="install"><span class="k">from</span> rag_guard <span class="k">import</span> RagGuard
+
+guard  = RagGuard(model=decision_model)
+report = guard.run(query, chunks, generate_fn)
+
+<span class="k">assert</span> report.action <span class="k">in</span> (
+    <span class="s">"answered"</span>, <span class="s">"answered_with_caveat"</span>, <span class="s">"insufficient_context"</span>,
+    <span class="s">"ungrounded_answer_flagged"</span>, <span class="s">"clarify"</span>, <span class="s">"escalate"</span>, <span class="s">"refuse"</span>,
+)</pre>
+      <p style="margin:32px 0 12px; font-size:16px; color:var(--text);">The judgment calls come from a pluggable decision model. Swap it without changing pipeline code:</p>
+      <div class="decision-pills">
+        <span>Heuristic <b>(no API key)</b></span>
+        <span>OpenAI</span>
+        <span>Anthropic</span>
+        <span>TypeSafe's Jev <b>(native typed decisions)</b></span>
       </div>
     </div>
   </section>
 
   <section>
-    <div class="wrap">
-      <h2>rag-guard is a real external dependency here, not embedded logic</h2>
-      <p class="section-sub">
-        This app installs rag-guard the way any other project would --
-        over <code>pip</code>, pinned to a commit -- specifically to prove
-        the published package behaves the way its own docs and test suite
-        claim once something outside its own repo actually depends on it.
-      </p>
-      <div class="library-callout">
-        <div class="code">
-<span class="k">from</span> rag_guard <span class="k">import</span> RagGuard
-
-guard = RagGuard(model=decision_model)
-report = guard.run(query, chunks, generate_fn)
-<span class="k">assert</span> report.action <span class="k">in</span> (<span class="s">"answered"</span>, <span class="s">"answered_with_caveat"</span>,
-                        <span class="s">"insufficient_context"</span>, <span class="s">"ungrounded_answer_flagged"</span>,
-                        <span class="s">"clarify"</span>, <span class="s">"escalate"</span>, <span class="s">"refuse"</span>)
-        </div>
-        <div>
-          The judgment calls themselves come from a pluggable decision
-          model -- this app can run on any of them without changing a
-          line of pipeline code:
-          <div class="backend-list">
-            <span>Heuristic (no API key needed)</span>
-            <span>OpenAI</span>
-            <span>Anthropic</span>
-            <span>TypeSafe's Jev (native typed decisions)</span>
-          </div>
-        </div>
-      </div>
+    <div class="wrap cta-band">
+      <h2>Ask your document something hard.</h2>
+      <p class="section-sub">Then open the trace and see exactly why it answered, or why it refused.</p>
+      <a class="btn btn-p" href="/app">Open the app <span aria-hidden="true">&rarr;</span></a>
     </div>
+    <footer>
+      <div class="wrap">
+        <span>rag-guard: a typed-decision accuracy layer for RAG pipelines.</span>
+        <span class="links">
+          <a href="https://github.com/furkandrms/jev-rag-guard">rag-guard library</a>
+          <a href="https://github.com/furkandrms/jev-rag-pipeline">jev-rag-pipeline (this demo)</a>
+          <a href="/app">Open the app</a>
+        </span>
+      </div>
+    </footer>
   </section>
-
-  <footer>
-    <div class="wrap" style="display:flex; justify-content:space-between; flex-wrap:wrap; gap:12px; width:100%;">
-      <span>rag-guard: a typed-decision accuracy layer for RAG pipelines.</span>
-      <div class="links">
-        <a href="https://github.com/furkandrms/jev-rag-guard">rag-guard (library)</a>
-        <a href="https://github.com/furkandrms/jev-rag-pipeline">jev-rag-pipeline (this demo)</a>
-        <a href="/app">Open the app</a>
-      </div>
-    </div>
-  </footer>
 </body>
 </html>
