@@ -62,7 +62,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, replace
 
-from fastapi import FastAPI, File, Header, HTTPException, UploadFile
+from fastapi import FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -100,27 +100,100 @@ MAX_UPLOAD_BYTES = 5 * 1024 * 1024  # 5 MB -- generous for text/markdown/small P
 # verbatim everywhere it's read.
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9-]{1,128}$")
 
-# Per-session sliding-window limit on pipeline runs -- /api/chat(/stream)
-# calls a real, billed LLM API on every request, so an unbounded client
-# (buggy or malicious) can otherwise run up real cost with no pushback.
-_RATE_LIMIT_MAX_CALLS = 20
-_RATE_LIMIT_WINDOW_SECONDS = 60.0
-_rate_limit_hits: dict[str, list[float]] = {}
+# Rate limiting is keyed on the caller's IP, not X-Session-Id -- the session
+# id is entirely client-chosen (the frontend mints it via crypto.randomUUID(),
+# but nothing stops a direct API caller from minting a fresh one per request),
+# so a session-keyed limit never actually bounds a single caller's request
+# rate. Cloud Run terminates TLS and proxies every request through its own
+# load balancer, which sets X-Forwarded-For to "<real client ip>, ..." -- the
+# first entry is trusted here because Cloud Run itself appends it (a client
+# can't forge what's already past Cloud Run's edge for a request that reached
+# this process at all).
+def _client_ip(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+# Separate limiters for the two cost shapes: /api/chat(/stream)/compare call
+# a billed LLM API per request, /api/upload(-sample) call a billed embedding
+# API per request and also grow this process's in-memory Chroma footprint --
+# worth bounding independently rather than letting a flood of uploads borrow
+# headroom from the chat limit or vice versa.
+_CHAT_RATE_LIMIT_MAX_CALLS = 20
+_CHAT_RATE_LIMIT_WINDOW_SECONDS = 60.0
+_UPLOAD_RATE_LIMIT_MAX_CALLS = 10
+_UPLOAD_RATE_LIMIT_WINDOW_SECONDS = 60.0
+_chat_rate_limit_hits: dict[str, list[float]] = {}
+_upload_rate_limit_hits: dict[str, list[float]] = {}
+
+# Idle-session cleanup: session collections/metadata/cache/history are all
+# in-memory and otherwise live for the life of the process (see README's
+# "known limitations") -- an attacker minting unbounded fresh session ids
+# (each with its own uploaded document) would otherwise grow this process's
+# memory without bound. Swept lazily (see `_maybe_sweep_stale_sessions`)
+# rather than on a background timer, to avoid adding a long-running task to
+# a request-driven process.
+_SESSION_TTL_SECONDS = 2 * 60 * 60  # 2 hours of inactivity
+_SWEEP_INTERVAL_SECONDS = 5 * 60  # don't scan all sessions more than this often
+_session_last_seen: dict[str, float] = {}
+_last_sweep_monotonic = 0.0
 
 
 def _check_session_id(x_session_id: str) -> str:
     if not _SESSION_ID_RE.match(x_session_id):
         raise HTTPException(400, "Invalid X-Session-Id")
+    _session_last_seen[x_session_id] = time.monotonic()
+    _maybe_sweep_stale_sessions()
     return x_session_id
 
 
-def _check_rate_limit(session_id: str) -> None:
+def _sweep_stale_sessions() -> None:
     now = time.monotonic()
-    hits = [t for t in _rate_limit_hits.get(session_id, []) if now - t < _RATE_LIMIT_WINDOW_SECONDS]
-    if len(hits) >= _RATE_LIMIT_MAX_CALLS:
+    stale = [sid for sid, seen in _session_last_seen.items() if now - seen > _SESSION_TTL_SECONDS]
+    for sid in stale:
+        remove_session_document(sid)
+        _session_meta.pop(sid, None)
+        _clear_session_cache(sid)
+        _session_last_seen.pop(sid, None)
+    if stale:
+        stage_log("sweep", "cleanup", f"removed {len(stale)} idle session(s) (TTL={_SESSION_TTL_SECONDS}s)")
+
+
+def _maybe_sweep_stale_sessions() -> None:
+    global _last_sweep_monotonic
+    now = time.monotonic()
+    if now - _last_sweep_monotonic < _SWEEP_INTERVAL_SECONDS:
+        return
+    _last_sweep_monotonic = now
+    _sweep_stale_sessions()
+
+
+def _check_rate_limit(
+    key: str, hits_by_key: dict[str, list[float]], max_calls: int, window_seconds: float
+) -> None:
+    now = time.monotonic()
+    hits = [t for t in hits_by_key.get(key, []) if now - t < window_seconds]
+    if len(hits) >= max_calls:
         raise HTTPException(429, "Too many requests -- please slow down")
     hits.append(now)
-    _rate_limit_hits[session_id] = hits
+    hits_by_key[key] = hits
+
+
+def _check_chat_rate_limit(request: Request) -> None:
+    _check_rate_limit(
+        _client_ip(request), _chat_rate_limit_hits, _CHAT_RATE_LIMIT_MAX_CALLS, _CHAT_RATE_LIMIT_WINDOW_SECONDS
+    )
+
+
+def _check_upload_rate_limit(request: Request) -> None:
+    _check_rate_limit(
+        _client_ip(request),
+        _upload_rate_limit_hits,
+        _UPLOAD_RATE_LIMIT_MAX_CALLS,
+        _UPLOAD_RATE_LIMIT_WINDOW_SECONDS,
+    )
 
 
 app = FastAPI(title="rag-guard document chat")
@@ -664,10 +737,12 @@ def document_status(x_session_id: str = Header(..., alias="X-Session-Id")) -> di
 
 @app.post("/api/upload")
 async def upload(
+    http_request: Request,
     file: UploadFile = File(...),
     x_session_id: str = Header(..., alias="X-Session-Id"),
 ) -> dict:
     x_session_id = _check_session_id(x_session_id)
+    _check_upload_rate_limit(http_request)
     # Bounded read: a file beyond the limit is rejected after one extra byte,
     # not after buffering the whole upload -- an unbounded `file.read()` here
     # would let an oversized upload exhaust memory before the size check runs.
@@ -699,10 +774,13 @@ def list_samples() -> dict:
 
 
 @app.post("/api/upload-sample")
-def upload_sample(request: SampleUploadRequest, x_session_id: str = Header(..., alias="X-Session-Id")) -> dict:
+def upload_sample(
+    body: SampleUploadRequest, http_request: Request, x_session_id: str = Header(..., alias="X-Session-Id")
+) -> dict:
     x_session_id = _check_session_id(x_session_id)
+    _check_upload_rate_limit(http_request)
     try:
-        filename, content = fetch_sample_doc(request.sample_id)
+        filename, content = fetch_sample_doc(body.sample_id)
     except KeyError:
         raise HTTPException(404, "Unknown sample document") from None
     except Exception as exc:
@@ -733,10 +811,10 @@ def delete_document(x_session_id: str = Header(..., alias="X-Session-Id")) -> di
 
 
 @app.post("/api/chat")
-def chat(request: ChatRequest, x_session_id: str = Header(..., alias="X-Session-Id")) -> dict:
+def chat(body: ChatRequest, http_request: Request, x_session_id: str = Header(..., alias="X-Session-Id")) -> dict:
     x_session_id = _check_session_id(x_session_id)
-    _check_rate_limit(x_session_id)
-    query = request.query.strip()
+    _check_chat_rate_limit(http_request)
+    query = body.query.strip()
     if not query:
         return {"error": "empty query"}
 
@@ -777,14 +855,14 @@ def _run_compare_for_provider(query: str, session_id: str, provider: str) -> dic
 
 
 @app.post("/api/compare")
-def compare(request: ChatRequest, x_session_id: str = Header(..., alias="X-Session-Id")) -> dict:
+def compare(body: ChatRequest, http_request: Request, x_session_id: str = Header(..., alias="X-Session-Id")) -> dict:
     """Compare-mode: the same question run through every embedding provider
     in EMBEDDING_PROVIDERS, in parallel, each with a raw (JEV-off) answer
     and a JEV-protected one side by side. See _run_compare_for_provider.
     """
     x_session_id = _check_session_id(x_session_id)
-    _check_rate_limit(x_session_id)
-    query = request.query.strip()
+    _check_chat_rate_limit(http_request)
+    query = body.query.strip()
     if not query:
         raise HTTPException(400, "empty query")
 
@@ -810,10 +888,10 @@ def compare(request: ChatRequest, x_session_id: str = Header(..., alias="X-Sessi
 
 
 @app.post("/api/chat/stream")
-def chat_stream(request: ChatRequest, x_session_id: str = Header(..., alias="X-Session-Id")):
+def chat_stream(body: ChatRequest, http_request: Request, x_session_id: str = Header(..., alias="X-Session-Id")):
     x_session_id = _check_session_id(x_session_id)
-    _check_rate_limit(x_session_id)
-    query = request.query.strip()
+    _check_chat_rate_limit(http_request)
+    query = body.query.strip()
 
     def sse():
         if not query:
