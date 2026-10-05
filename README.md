@@ -86,15 +86,18 @@ retrieved from it.
 ### Live pipeline, not a spinner
 
 Each reply streams in stage by stage over Server-Sent Events, as the real
-pipeline actually runs -- a small stepper lights up **Retrieve → Relevance
-→ Sufficiency → Generate → Ground** live, each with its own real elapsed
-time. If sufficiency fails, Generate/Ground visibly gray out as skipped
-instead of running pointlessly. This isn't a simulated animation: `app.py`
-calls rag-guard's own stage functions (`filter_relevant_chunks`,
-`check_sufficiency`, `check_grounding` -- the same ones `RagGuard.run()`
-calls internally) directly instead of through that one wrapper, so each
-stage's completion can be observed and pushed to the client the moment it
-actually finishes.
+pipeline actually runs -- a small stepper lights up **Intent → Retrieve →
+Relevance → Clarify → Sufficiency → Generate → Ground** live, each with its
+own real elapsed time. A query stopped by the intent gate (escalate/refuse)
+skips retrieval entirely; a query stopped by the clarify gate skips
+straight to asking a clarifying question instead of generating. If
+sufficiency fails, Generate/Ground visibly gray out as skipped instead of
+running pointlessly. This isn't a simulated animation: `app.py` calls
+rag-guard's own stage functions (`check_intent`, `filter_relevant_chunks`,
+`check_ambiguity`, `check_sufficiency`, `check_grounding`, `check_caveat`
+-- the same ones `RagGuard.run()` calls internally) directly instead of
+through that one wrapper, so each stage's completion can be observed and
+pushed to the client the moment it actually finishes.
 
 A per-session metrics strip tracks real numbers across the conversation:
 queries asked, total decision-model calls made, tokens used (from the
@@ -129,10 +132,13 @@ answer is only ever valid for the document it was computed against.
   `GuardReport` trace plus real metrics out. Blocks until done; used by
   curl/tests. Fails with a clear 400 if no document has been uploaded yet.
 - `POST /api/chat/stream` -- same pipeline, as Server-Sent Events: one
-  event per stage (`retrieval`, `relevance`, `sufficiency`, `generation`,
-  `grounding`, each with `elapsed_ms`) as it actually completes, then a
-  final `done` event with the full report -- or a single `cached` event
-  on a cache hit. This is what the web UI uses.
+  event per stage (`intent`, `retrieval`, `relevance`, `clarify`,
+  `sufficiency`, `generation`, `grounding`, `caveat`, each with
+  `elapsed_ms`) as it actually completes, then a final `done` event with
+  the full report -- or a single `cached` event on a cache hit. The
+  `intent` and `clarify` events can themselves end the turn early (with
+  `action` = `"escalate"`/`"refuse"`/`"clarify"` in the final report)
+  without the later stages ever running. This is what the web UI uses.
 - `POST /api/compare` -- `{"query": "..."}` in, both providers' raw +
   JEV-protected results out (see "Embedding provider comparison" below).
   Blocks until both providers finish running in parallel.
@@ -161,15 +167,20 @@ Cloud Run instance, `min-instances=1 max-instances=1`) this doesn't come
 up at all.
 
 The frontend never hides a decision behind a plain "here's your answer" --
-every reply has a **Why this answer?** toggle. Opening it shows three
-stages, each with a pass/fail indicator dot: **Relevance** (a bar per
-retrieved chunk, green for kept and gray for dropped, with its probability
-and a text snippet), **Sufficiency** (a probability bar against the
-configured threshold), and **Grounding** (each claim in the answer, tagged
-supported/unsupported with its own probability). The goal is that a
-non-technical reader can look at a flagged or rejected answer and see
-*which* stage and *which specific evidence* drove that outcome, not just
-trust a black box.
+every reply has a **Why this answer?** toggle. Opening it shows every gate
+rag-guard ran, each with a pass/fail indicator dot: **Intent** (the
+proceed/escalate/refuse classification and its probability), **Relevance**
+(a bar per retrieved chunk, green for kept and gray for dropped, with its
+probability and a text snippet), **Clarify** (whether the question needed
+more information to answer safely), **Sufficiency** (a probability bar
+against the configured threshold), **Grounding** (each claim in the
+answer, tagged supported/unsupported with its own probability), and
+**Caveat** (whether the answer depends on a condition or exception worth
+surfacing). A gate that didn't run for a given turn (e.g. Grounding when
+the intent gate already stopped the pipeline) shows no dot rather than a
+false pass/fail. The goal is that a non-technical reader can look at a
+flagged or rejected answer and see *which* stage and *which specific
+evidence* drove that outcome, not just trust a black box.
 
 Every chunk id shown in the trace is HTML-escaped before being inserted
 into the page (`static/app.js`'s `escapeHtml()`) -- chunk ids are derived
