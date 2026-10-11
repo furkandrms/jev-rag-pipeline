@@ -21,8 +21,9 @@ const metricsStripEl = document.getElementById("metrics-strip");
 const activityLogEl = document.getElementById("activity-log");
 const sideStepperEl = document.getElementById("side-stepper");
 const modeToggleEl = document.getElementById("mode-toggle");
-const layaSwitchEl = document.getElementById("laya-switch");
+const layaSwitchEl = document.getElementById("laya-control");
 const layaToggleEl = document.getElementById("laya-toggle");
+const layaCpuNoteEl = document.getElementById("laya-cpu-note");
 const singleProviderViewEl = document.getElementById("single-provider-view");
 const compareViewEl = document.getElementById("compare-view");
 const compareIntroEl = document.getElementById("compare-intro");
@@ -185,17 +186,34 @@ function logLine(icon, html) {
   activityLogEl.scrollTop = activityLogEl.scrollHeight;
 }
 
+// Populated by loadInfo(), then re-read by renderBackendBadges() every time
+// the Laya toggle flips -- the "decisions:" badge should reflect whichever
+// model today's request actually used, not just the server's own default.
+let backendInfo = null;
+
+function renderBackendBadges() {
+  if (!backendInfo) {
+    badgesEl.innerHTML = `<span class="backend-badge">backend info unavailable</span>`;
+    return;
+  }
+  const usingLaya = layaToggleEl.checked;
+  const decisionLabel = usingLaya ? "laya" : backendInfo.decision_model;
+  badgesEl.innerHTML = `
+    <span class="backend-badge">generate: <b>${escapeHtml(backendInfo.generate_model || backendInfo.generate_fn)}</b></span>
+    <span class="backend-badge${usingLaya ? " backend-badge-laya" : ""}">decisions: <b>${escapeHtml(decisionLabel)}</b></span>
+  `;
+}
+
 async function loadInfo() {
   try {
     const res = await fetch("/api/info");
     const data = await res.json();
     if (data.thresholds) thresholds = data.thresholds;
-    badgesEl.innerHTML = `
-      <span class="backend-badge">generate: <b>${escapeHtml(data.generate_model || data.generate_fn)}</b></span>
-      <span class="backend-badge">decisions: <b>${escapeHtml(data.decision_model)}</b></span>
-    `;
+    backendInfo = data;
+    renderBackendBadges();
   } catch (e) {
-    badgesEl.innerHTML = `<span class="backend-badge">backend info unavailable</span>`;
+    backendInfo = null;
+    renderBackendBadges();
   }
 }
 
@@ -237,6 +255,14 @@ function setMode(mode) {
 modeToggleEl.addEventListener("click", (e) => {
   const btn = e.target.closest(".mode-btn");
   if (btn) setMode(btn.dataset.mode);
+});
+
+// role="switch" on a native checkbox doesn't get aria-checked synced by
+// the browser automatically -- kept in step by hand on every change,
+// including keyboard (Space) toggles, which fire the same "change" event.
+layaToggleEl.addEventListener("change", () => {
+  layaToggleEl.setAttribute("aria-checked", String(layaToggleEl.checked));
+  renderBackendBadges();
 });
 
 async function checkExistingDocument() {
@@ -776,6 +802,7 @@ async function sendQuery(query) {
     // "thinking" state says so instead of looking stuck.
     container.querySelector(".msg-bubble").innerHTML =
       `<span class="dots">thinking (Laya decisions, can take a while on CPU)</span>`;
+    layaCpuNoteEl.hidden = false;
   }
   renderSideTimelineIdle();
 
@@ -867,6 +894,7 @@ async function sendQuery(query) {
     logLine("fail", "request failed");
   } finally {
     sendBtn.disabled = false;
+    layaCpuNoteEl.hidden = true;
   }
 }
 

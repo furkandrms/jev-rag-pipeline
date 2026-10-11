@@ -416,12 +416,27 @@ body {
 
 /* --- "Use Laya" switch (single-provider mode only) ----------------------- */
 
+.laya-control {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  /* Clear separation from "Remove document" next to it in the doc-bar --
+     a setting should never read as part of that destructive action. */
+  padding-left: 16px;
+  margin-left: 8px;
+  border-left: 1px solid var(--border);
+}
+
 .laya-switch {
   display: flex;
   align-items: center;
   gap: 8px;
   cursor: pointer;
   user-select: none;
+  /* Padding (not a taller track) gets the clickable/tappable area to the
+     ~32px comfortable touch-target minimum without changing how the
+     switch itself looks. */
+  padding: 6px 0;
 }
 
 .laya-switch input {
@@ -465,7 +480,7 @@ body {
 
 .laya-switch input:focus-visible + .laya-switch-track {
   outline: 2px solid var(--accent-text);
-  outline-offset: 2px;
+  outline-offset: 3px;
 }
 
 .laya-switch-label {
@@ -476,6 +491,37 @@ body {
 .laya-switch-note {
   color: var(--text-dimmer);
   font-size: 11.5px;
+}
+
+.laya-switch-help {
+  /* Lines up under the label text rather than the track (34px track +
+     8px gap). Visible always -- not just on hover/tooltip -- so it
+     reads on touch devices too. */
+  padding-left: 42px;
+  max-width: 230px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-dimmer);
+}
+
+.backend-badge-laya {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+}
+
+.backend-badge-laya b {
+  color: var(--accent-text);
+}
+
+.laya-cpu-note {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--accent-text);
+  background: var(--accent-dim);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-bottom: 12px;
 }
 
 /* --- Compare mode: one column per embedding provider ------------------------ */
@@ -1612,6 +1658,24 @@ body {
 
   .mode-btn {
     flex: 1;
+  }
+
+  /* Own full-width row, same pattern as .mode-toggle above -- keeps the
+     switch + its help text from being squeezed next to "Remove document"
+     or overflowing the doc-bar at phone widths. */
+  .laya-control {
+    order: 4;
+    width: 100%;
+    margin: 4px 0 0;
+    padding-left: 0;
+    margin-left: 0;
+    border-left: none;
+    border-top: 1px solid var(--border);
+    padding-top: 8px;
+  }
+
+  .laya-switch-help {
+    max-width: none;
   }
 
   /* Still shown -- these are a trust signal (which models are answering

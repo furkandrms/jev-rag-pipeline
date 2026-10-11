@@ -62,11 +62,14 @@
           <button type="button" class="mode-btn active" data-mode="single">Single provider</button>
           <button type="button" class="mode-btn" data-mode="compare">Compare <span class="mono" style="opacity:.7">2</span></button>
         </div>
-        <label class="laya-switch" id="laya-switch" title="Routes every relevance / sufficiency / grounding / caveat decision through a self-hosted, open-weight model (convaiinnovations/laya) instead of the default one. Much slower per query on this server -- it has no GPU.">
-          <input type="checkbox" id="laya-toggle" />
-          <span class="laya-switch-track"><span class="laya-switch-thumb"></span></span>
-          <span class="laya-switch-label">Use Laya <span class="laya-switch-note">(open-weight, slower)</span></span>
-        </label>
+        <div class="laya-control" id="laya-control">
+          <label class="laya-switch" title="Routes every relevance / sufficiency / grounding / caveat decision through a self-hosted, open-weight model (convaiinnovations/laya) instead of the default one. Much slower per query on this server -- it has no GPU.">
+            <input type="checkbox" id="laya-toggle" role="switch" aria-checked="false" aria-describedby="laya-switch-help" />
+            <span class="laya-switch-track"><span class="laya-switch-thumb"></span></span>
+            <span class="laya-switch-label">Use Laya <span class="laya-switch-note">(open-weight, slower)</span></span>
+          </label>
+          <span class="laya-switch-help" id="laya-switch-help">No GPU on this server: answers take noticeably longer.</span>
+        </div>
         <button type="button" class="doc-change-btn" id="doc-change-btn">Remove document</button>
       </div>
 
@@ -107,6 +110,7 @@
 
           <div class="insp-panel" id="insp-panel-pipeline" role="tabpanel" aria-labelledby="insp-tab-pipeline">
             <h3 class="side-title">Pipeline stage</h3>
+            <div class="laya-cpu-note" id="laya-cpu-note" hidden role="status">Laya runs on CPU; this may take a while.</div>
             <div class="stage-timeline" id="side-stepper"></div>
             <h3 class="side-title" style="margin-top:22px">Session metrics</h3>
             <div class="metrics-grid" id="metrics-strip"></div>
