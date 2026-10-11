@@ -62,6 +62,11 @@
           <button type="button" class="mode-btn active" data-mode="single">Single provider</button>
           <button type="button" class="mode-btn" data-mode="compare">Compare <span class="mono" style="opacity:.7">2</span></button>
         </div>
+        <label class="laya-switch" id="laya-switch" title="Routes every relevance / sufficiency / grounding / caveat decision through a self-hosted, open-weight model (convaiinnovations/laya) instead of the default one. Much slower per query on this server -- it has no GPU.">
+          <input type="checkbox" id="laya-toggle" />
+          <span class="laya-switch-track"><span class="laya-switch-thumb"></span></span>
+          <span class="laya-switch-label">Use Laya <span class="laya-switch-note">(open-weight, slower)</span></span>
+        </label>
         <button type="button" class="doc-change-btn" id="doc-change-btn">Remove document</button>
       </div>
 

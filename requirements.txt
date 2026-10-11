@@ -25,3 +25,14 @@ pypdf>=4.0                 # PDF text extraction for /api/upload
 # visitor to have their own file to upload. No-op locally without that env
 # var set; see pipeline_setup.py's sample_docs_available().
 google-cloud-storage>=2.14
+
+# Optional "Use Laya" decision-model toggle (see laya_decision_model.py and
+# ChatRequest.use_laya) -- a self-hosted, open-weight alternative to the
+# default OpenAI/Anthropic-backed decisions. torch>=2.5 is laya's own
+# requirement (transformers silently disables PyTorch support below that
+# and fails in a confusing way -- verified locally); pinned explicitly
+# here instead of left to dependency resolution. Adds real size to the
+# image and, on a GPU/MPS-less host like Cloud Run, real per-call latency
+# -- see laya_decision_model.py's module docstring for the measured numbers.
+torch>=2.5
+laya>=0.4

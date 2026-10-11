@@ -21,6 +21,8 @@ const metricsStripEl = document.getElementById("metrics-strip");
 const activityLogEl = document.getElementById("activity-log");
 const sideStepperEl = document.getElementById("side-stepper");
 const modeToggleEl = document.getElementById("mode-toggle");
+const layaSwitchEl = document.getElementById("laya-switch");
+const layaToggleEl = document.getElementById("laya-toggle");
 const singleProviderViewEl = document.getElementById("single-provider-view");
 const compareViewEl = document.getElementById("compare-view");
 const compareIntroEl = document.getElementById("compare-intro");
@@ -225,6 +227,10 @@ function setMode(mode) {
   });
   singleProviderViewEl.hidden = mode !== "single";
   compareViewEl.hidden = mode !== "compare";
+  // Laya swaps the decision model, not the embedding provider compare
+  // mode is about -- scoped to single-provider mode to keep the two
+  // toggles from implying a 2x2 combination the UI doesn't actually offer.
+  layaSwitchEl.hidden = mode !== "single";
   if (mode === "compare") compareInput.focus();
 }
 
@@ -725,11 +731,11 @@ function recordMetrics(report, totalMs, cached) {
 
 /* --- Streaming chat -------------------------------------------------------------- */
 
-async function streamChat(query, onEvent) {
+async function streamChat(query, useLaya, onEvent) {
   const res = await fetch("/api/chat/stream", {
     method: "POST",
     headers: { "Content-Type": "application/json", "X-Session-Id": sessionId },
-    body: JSON.stringify({ query }),
+    body: JSON.stringify({ query, use_laya: useLaya }),
   });
   if (!res.ok || !res.body) {
     const data = await res.json().catch(() => ({}));
@@ -760,8 +766,17 @@ async function sendQuery(query) {
   const emptyState = document.getElementById("empty-state");
   if (emptyState) emptyState.remove();
 
+  const useLaya = layaToggleEl.checked;
+
   addUserMessage(query);
   const container = addAssistantMessage();
+  if (useLaya) {
+    // Laya runs every decision on this server's CPU (no GPU) -- a single
+    // query can take tens of seconds instead of the usual ~2-5s, so the
+    // "thinking" state says so instead of looking stuck.
+    container.querySelector(".msg-bubble").innerHTML =
+      `<span class="dots">thinking (Laya decisions, can take a while on CPU)</span>`;
+  }
   renderSideTimelineIdle();
 
   // Mirrors every stepper update into the sidebar timeline too, so the
@@ -786,7 +801,7 @@ async function sendQuery(query) {
   logLine("info", `query: <b>${escapeHtml(query)}</b>`);
 
   try {
-    await streamChat(query, (event, data) => {
+    await streamChat(query, useLaya, (event, data) => {
       if (event === "error") {
         container.querySelector(".msg-bubble").textContent = data.detail;
         sideStepperEl.innerHTML = `<div class="stepper-empty">Last query failed.</div>`;

@@ -759,3 +759,29 @@ def setup():
         "decision_model": decision_backend,
     }
     return guard, retrieve, generate_fn, make_upload_generate_fn, rewrite_query_fn, backend_info, clarify_fn
+
+
+# --- Laya: an opt-in, self-hosted decision-model backend --------------------
+# A second RagGuard, identical to setup()'s except for which DecisionModel
+# backs it, built lazily (only if/when a request actually opts in via
+# ChatRequest.use_laya) so a visitor who never touches the toggle never
+# pays Laya's checkpoint download/load cost. See laya_decision_model.py for
+# what this trades off against the default OpenAI/Anthropic-backed guard.
+_laya_guard_instance: RagGuard | None = None
+_laya_guard_lock = threading.Lock()
+
+
+def get_laya_guard() -> RagGuard:
+    global _laya_guard_instance
+    if _laya_guard_instance is None:
+        with _laya_guard_lock:
+            if _laya_guard_instance is None:
+                from laya_decision_model import LayaDecisionModel
+
+                _laya_guard_instance = RagGuard(
+                    model=LayaDecisionModel(),
+                    sufficiency_threshold=0.45,
+                    partial_sufficiency_threshold=0.5,
+                    rerank_by_relevance=True,
+                )
+    return _laya_guard_instance

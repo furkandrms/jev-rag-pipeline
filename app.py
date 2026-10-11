@@ -75,6 +75,7 @@ from pipeline_setup import (
     extract_text,
     fetch_sample_doc,
     get_compare_collection,
+    get_laya_guard as _laya_guard,
     get_session_collection,
     make_retriever,
     remove_session_document,
@@ -230,6 +231,10 @@ def _remember_turn(session_id: str, query: str, answer: str) -> None:
 
 class ChatRequest(BaseModel):
     query: str
+    # Opt-in per-request switch to the self-hosted Laya decision model
+    # instead of the default (OpenAI/Anthropic-backed) one -- same
+    # thresholds, same pipeline stages, see _laya_guard() below.
+    use_laya: bool = False
 
 
 class SampleUploadRequest(BaseModel):
@@ -287,7 +292,7 @@ def _serialize_guard_report(report) -> dict:
     }
 
 
-def _run_pipeline(query: str, session_id: str):
+def _run_pipeline(query: str, session_id: str, guard=None):
     """Generator yielding (event_name, data) as each real pipeline stage completes.
 
     Mirrors RagGuard.run()'s own stage order exactly (see
@@ -296,7 +301,20 @@ def _run_pipeline(query: str, session_id: str):
     internally, called directly instead of through that one wrapper, so
     each stage's completion (and real elapsed time) can be observed and
     streamed as it happens instead of only seeing the final result.
+
+    `guard` defaults to the app's default RagGuard (OpenAI/Anthropic-backed
+    decisions); the chat endpoints pass `_laya_guard()` instead when the
+    request opts into Laya -- same thresholds, same stage order, only
+    `guard.model` (and therefore every noul/choice call underneath) differs.
     """
+    # Must be captured before the None -> _guard fallback below: it's what
+    # keeps a Laya-decided answer from being served back for an identical
+    # query text asked again with the default guard (or vice versa) --
+    # same session, same text, different decision model, not the same
+    # answer. See the cache_key line further down.
+    using_laya = guard is not None
+    if guard is None:
+        guard = _guard
     t_total = time.monotonic()
     stage_log(session_id, "query", f'"{query}"')
 
@@ -344,7 +362,7 @@ def _run_pipeline(query: str, session_id: str):
         yield "error", {"detail": "No document uploaded yet for this session"}
         return
 
-    cache_key = (session_id, query.strip().lower())
+    cache_key = (session_id, query.strip().lower(), using_laya)
     cached = _response_cache.get(cache_key)
     if cached is not None:
         elapsed = _elapsed_ms(t_total)
@@ -818,8 +836,15 @@ def chat(body: ChatRequest, http_request: Request, x_session_id: str = Header(..
     if not query:
         return {"error": "empty query"}
 
+    guard = None
+    if body.use_laya:
+        try:
+            guard = _laya_guard()
+        except Exception as exc:
+            raise HTTPException(503, f"Laya is unavailable right now: {exc}") from exc
+
     event, data = None, None
-    for event, data in _run_pipeline(query, x_session_id):
+    for event, data in _run_pipeline(query, x_session_id, guard=guard):
         pass  # drain to the final event; intermediate stages are for /stream only
 
     if event == "error":
@@ -897,7 +922,14 @@ def chat_stream(body: ChatRequest, http_request: Request, x_session_id: str = He
         if not query:
             yield f"event: error\ndata: {json.dumps({'detail': 'empty query'})}\n\n"
             return
-        for event, data in _run_pipeline(query, x_session_id):
+        guard = None
+        if body.use_laya:
+            try:
+                guard = _laya_guard()
+            except Exception as exc:
+                yield f"event: error\ndata: {json.dumps({'detail': f'Laya is unavailable right now: {exc}'})}\n\n"
+                return
+        for event, data in _run_pipeline(query, x_session_id, guard=guard):
             yield f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
     return StreamingResponse(sse(), media_type="text/event-stream")
