@@ -19,11 +19,11 @@ actually have a first-party embeddings endpoint. Re-add a third leg (Voyage
 or otherwise) by writing one more `_build_*_collection` function and adding
 it to PROVIDERS below -- the comparison loop itself is provider-agnostic.
 
-Run:
-    python eval_multi_embedding.py
+Run (from the repo root):
+    python -m eval.eval_multi_embedding
 
 Needs OPENAI_API_KEY and GOOGLE_API_KEY in .env (the latter is also used
-for Jev if TYPESAFE_API_KEY isn't set -- see pipeline_setup.setup()), plus
+for Jev if TYPESAFE_API_KEY isn't set -- see jevrag.setup.setup()), plus
 the same document(s) as eval_rag_guard.py (DOCS, imported from it).
 """
 
@@ -38,8 +38,8 @@ from dataclasses import dataclass
 import chromadb.utils.embedding_functions as embedding_functions
 from chromadb.api.types import EmbeddingFunction
 
-from eval_rag_guard import DOCS, ROOT, Doc, _answered_set, _recall_hit
-from pipeline_setup import (
+from eval.eval_rag_guard import DOCS, ROOT, Doc, _answered_set, _recall_hit
+from jevrag.setup import (
     _add_chunks_in_batches,
     chunk_text,
     extract_text,

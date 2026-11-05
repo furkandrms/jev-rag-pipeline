@@ -19,7 +19,7 @@ Usage:
 
 from __future__ import annotations
 
-from pipeline_setup import setup
+from jevrag.setup import setup
 
 
 def _print_trace(report) -> None:

@@ -38,7 +38,7 @@ JSON/SSE API the frontend calls:
 Sessions are scoped by an `X-Session-Id` header the frontend mints itself
 (crypto.randomUUID(), persisted in localStorage) -- there's no login, just
 enough identity to keep one browser's uploaded document out of another's.
-See pipeline_setup.py's module docstring for the isolation guarantee this
+See jevrag/setup.py's module docstring for the isolation guarantee this
 relies on.
 
 Run locally:
@@ -67,8 +67,8 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from pipeline_logging import stage_log
-from pipeline_setup import (
+from jevrag.stage_logging import stage_log
+from jevrag.setup import (
     EMBEDDING_PROVIDERS,
     InvalidCustomBackend,
     build_custom_ollama_backend,
