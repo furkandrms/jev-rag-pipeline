@@ -184,6 +184,56 @@ _ADD_BATCH_SIZE = 90
 _ADD_RETRY_ATTEMPTS = 3
 _ADD_RETRY_BASE_DELAY_SECONDS = 20.0
 
+_embedding_provider_broken = False
+
+
+def _is_auth_error(exc: Exception) -> bool:
+    """True for a non-retryable authentication/permission failure (HTTP 401
+    or 403), whether raised directly (OpenAI/Google SDK exceptions carry a
+    `.status_code`) or wrapped by chromadb, which sometimes re-raises as a
+    plain ValueError with the original exception chained via `__cause__`.
+
+    A bad or revoked key never recovers by waiting -- retrying it
+    `_ADD_RETRY_ATTEMPTS` times with up to a minute of backoff (meant for
+    transient failures, see above) only delays an inevitable failure.
+    """
+    seen: BaseException | None = exc
+    for _ in range(3):
+        if getattr(seen, "status_code", None) in (401, 403):
+            return True
+        seen = seen.__cause__ or seen.__context__
+        if seen is None:
+            return False
+    return False
+
+
+def _fall_back_to_local_embedding(reason: Exception) -> None:
+    """Switch every future `get_embedding_function()` call to chromadb's
+    local default embedding, and say why.
+
+    Called once an OpenAI/Gemini embedding call has actually failed (bad or
+    revoked key, persistent API error) instead of letting that exception
+    crash the whole app -- app.py calls `build_vector_store()` at import
+    time, before the server even starts listening, so an unhandled failure
+    here previously took the whole process down before a single request
+    could be served. Remembered globally (not just for this one call) so a
+    later per-session upload (`replace_session_document`) doesn't pay the
+    same failing-provider retry cost again.
+    """
+    global _embedding_function, _embedding_provider_broken
+    from chromadb.utils import embedding_functions
+
+    print(
+        f"Embedding provider failed ({reason!r}) -- falling back to "
+        "chromadb's local default embedding for the rest of this run "
+        "instead of crashing. Check OPENAI_API_KEY/GOOGLE_API_KEY if this "
+        "is unexpected; retrieval quality will be noticeably worse on real "
+        "documents (see get_embedding_function()'s docstring).",
+        file=sys.stderr,
+    )
+    _embedding_function = embedding_functions.DefaultEmbeddingFunction()
+    _embedding_provider_broken = True
+
 
 def _add_chunks_in_batches(collection, ids: list[str], documents: list[str]) -> None:
     for start in range(0, len(ids), _ADD_BATCH_SIZE):
@@ -193,10 +243,33 @@ def _add_chunks_in_batches(collection, ids: list[str], documents: list[str]) -> 
             try:
                 collection.add(ids=batch_ids, documents=batch_docs)
                 break
-            except Exception:
-                if attempt == _ADD_RETRY_ATTEMPTS - 1:
+            except Exception as exc:
+                if _is_auth_error(exc) or attempt == _ADD_RETRY_ATTEMPTS - 1:
                     raise
                 time.sleep(_ADD_RETRY_BASE_DELAY_SECONDS * (attempt + 1))
+
+
+def _add_chunks_with_fallback(
+    client, collection, collection_name: str, ids: list[str], documents: list[str], *, recreate
+):
+    """Add `ids`/`documents` to the already-created `collection`, falling
+    back to local embedding and retrying once if the configured provider
+    fails.
+
+    `recreate(embedding_function)` must (re)create and return the named
+    collection with that embedding function, used only for the fallback
+    rebuild -- `build_vector_store()` and `replace_session_document()` each
+    create a collection slightly differently (get_or_create vs. create), so
+    that part stays with the caller.
+    """
+    try:
+        _add_chunks_in_batches(collection, ids, documents)
+    except Exception as exc:
+        _fall_back_to_local_embedding(exc)
+        client.delete_collection(collection_name)
+        collection = recreate(get_embedding_function())
+        _add_chunks_in_batches(collection, ids, documents)
+    return collection
 
 
 def build_vector_store():
@@ -206,7 +279,16 @@ def build_vector_store():
     )
     if collection.count() == 0:
         ids, texts = zip(*DOCUMENTS)
-        _add_chunks_in_batches(collection, list(ids), list(texts))
+        collection = _add_chunks_with_fallback(
+            client,
+            collection,
+            COLLECTION_NAME,
+            list(ids),
+            list(texts),
+            recreate=lambda fn: client.get_or_create_collection(
+                COLLECTION_NAME, embedding_function=fn
+            ),
+        )
     return collection
 
 
@@ -287,8 +369,14 @@ def replace_session_document(session_id: str, filename: str, chunks: list[str]):
         pass  # nothing to delete yet
     collection = client.create_collection(name, embedding_function=get_embedding_function())
     ids = [f"{filename}-{i}" for i in range(len(chunks))]
-    _add_chunks_in_batches(collection, ids, chunks)
-    return collection
+    return _add_chunks_with_fallback(
+        client,
+        collection,
+        name,
+        ids,
+        chunks,
+        recreate=lambda fn: client.create_collection(name, embedding_function=fn),
+    )
 
 
 def get_session_collection(session_id: str):
