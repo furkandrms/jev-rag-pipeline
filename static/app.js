@@ -24,6 +24,11 @@ const modeToggleEl = document.getElementById("mode-toggle");
 const layaSwitchEl = document.getElementById("laya-control");
 const layaToggleEl = document.getElementById("laya-toggle");
 const layaCpuNoteEl = document.getElementById("laya-cpu-note");
+const customModelStatusEl = document.getElementById("custom-model-status");
+const customModelUrlEl = document.getElementById("custom-model-url");
+const customModelNameEl = document.getElementById("custom-model-name");
+const customModelEnableEl = document.getElementById("custom-model-enable");
+const customModelErrorEl = document.getElementById("custom-model-error");
 const singleProviderViewEl = document.getElementById("single-provider-view");
 const compareViewEl = document.getElementById("compare-view");
 const compareIntroEl = document.getElementById("compare-intro");
@@ -85,6 +90,98 @@ const sessionMetrics = {
   decisionCalls: 0,
   latencies: [],
 };
+
+/* --- Custom Ollama backend (per-visitor, opt-in) ---------------------------
+   Lets a visitor connect their own free cloudflare-ollama-bridge tunnel and
+   use it for just their own questions instead of this server's default
+   generation backend -- see pipeline_setup.py's build_custom_ollama_backend
+   and app.py's _resolve_backend for the server-side half, including the
+   same URL allowlist enforced again here (client-side is a UX nicety, the
+   server is the real boundary -- never trust this check alone). Persisted
+   in localStorage, never sent anywhere but this app's own backend. */
+const CUSTOM_MODEL_HOST_RE = /^([a-z0-9-]+\.trycloudflare\.com|localhost|127\.0\.0\.1)$/;
+
+function loadCustomModel() {
+  try {
+    return {
+      url: localStorage.getItem("jevrag_custom_model_url") || "",
+      name: localStorage.getItem("jevrag_custom_model_name") || "",
+      enabled: localStorage.getItem("jevrag_custom_model_enabled") === "1",
+    };
+  } catch {
+    return { url: "", name: "", enabled: false };
+  }
+}
+
+function saveCustomModel(state) {
+  try {
+    localStorage.setItem("jevrag_custom_model_url", state.url);
+    localStorage.setItem("jevrag_custom_model_name", state.name);
+    localStorage.setItem("jevrag_custom_model_enabled", state.enabled ? "1" : "0");
+  } catch {
+    // Private browsing / storage disabled -- the toggle still works for
+    // this page load, it just won't persist across reloads.
+  }
+}
+
+function validateCustomModelUrl(url) {
+  try {
+    const parsed = new URL(url);
+    if (!["http:", "https:"].includes(parsed.protocol)) return false;
+    return CUSTOM_MODEL_HOST_RE.test(parsed.hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
+function customModelPayload() {
+  const state = loadCustomModel();
+  if (!state.enabled || !state.url.trim() || !state.name.trim()) return {};
+  return { model_server_url: state.url.trim(), model_name: state.name.trim() };
+}
+
+function renderCustomModelUi() {
+  const state = loadCustomModel();
+  customModelUrlEl.value = state.url;
+  customModelNameEl.value = state.name;
+  customModelEnableEl.checked = state.enabled;
+  const active = state.enabled && state.url.trim() && state.name.trim();
+  customModelStatusEl.hidden = !active;
+  // The backend checks the custom model before Laya (see app.py's
+  // _resolve_backend) -- the Laya toggle would silently do nothing while
+  // a custom model is active, so disable it rather than let it lie.
+  layaToggleEl.disabled = active;
+  layaSwitchEl.classList.toggle("laya-control-disabled", active);
+}
+
+function persistCustomModelFromInputs() {
+  const url = customModelUrlEl.value.trim();
+  const name = customModelNameEl.value.trim();
+  const enabled = customModelEnableEl.checked;
+
+  customModelErrorEl.hidden = true;
+  if (enabled) {
+    if (!url || !name) {
+      customModelErrorEl.textContent = "Enter both a tunnel URL and a model name.";
+      customModelErrorEl.hidden = false;
+    } else if (!validateCustomModelUrl(url)) {
+      customModelErrorEl.textContent =
+        "Must be a *.trycloudflare.com tunnel URL (or localhost/127.0.0.1).";
+      customModelErrorEl.hidden = false;
+    }
+  }
+
+  saveCustomModel({ url, name, enabled });
+  renderCustomModelUi();
+  renderBackendBadges();
+}
+
+[customModelUrlEl, customModelNameEl].forEach((el) =>
+  el.addEventListener("input", persistCustomModelFromInputs)
+);
+customModelEnableEl.addEventListener("change", persistCustomModelFromInputs);
+
+renderCustomModelUi();
 
 // A per-browser (not per-account) session id, just enough identity to keep
 // one visitor's uploaded document out of another's -- minted once and kept
@@ -196,11 +293,17 @@ function renderBackendBadges() {
     badgesEl.innerHTML = `<span class="backend-badge">backend info unavailable</span>`;
     return;
   }
-  const usingLaya = layaToggleEl.checked;
-  const decisionLabel = usingLaya ? "laya" : backendInfo.decision_model;
+  const custom = customModelPayload();
+  const usingCustom = Boolean(custom.model_name);
+  const usingLaya = !usingCustom && layaToggleEl.checked;
+  const generateLabel = usingCustom
+    ? custom.model_name
+    : backendInfo.generate_model || backendInfo.generate_fn;
+  const decisionLabel = usingCustom ? custom.model_name : usingLaya ? "laya" : backendInfo.decision_model;
+  const activeClass = usingCustom ? " backend-badge-laya" : "";
   badgesEl.innerHTML = `
-    <span class="backend-badge">generate: <b>${escapeHtml(backendInfo.generate_model || backendInfo.generate_fn)}</b></span>
-    <span class="backend-badge${usingLaya ? " backend-badge-laya" : ""}">decisions: <b>${escapeHtml(decisionLabel)}</b></span>
+    <span class="backend-badge${activeClass}">generate: <b>${escapeHtml(generateLabel)}</b></span>
+    <span class="backend-badge${usingLaya || usingCustom ? " backend-badge-laya" : ""}">decisions: <b>${escapeHtml(decisionLabel)}</b></span>
   `;
 }
 
@@ -761,7 +864,7 @@ async function streamChat(query, useLaya, onEvent) {
   const res = await fetch("/api/chat/stream", {
     method: "POST",
     headers: { "Content-Type": "application/json", "X-Session-Id": sessionId },
-    body: JSON.stringify({ query, use_laya: useLaya }),
+    body: JSON.stringify({ query, use_laya: useLaya, ...customModelPayload() }),
   });
   if (!res.ok || !res.body) {
     const data = await res.json().catch(() => ({}));

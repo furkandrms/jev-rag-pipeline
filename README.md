@@ -59,6 +59,8 @@ pip install -r requirements.txt
 
 cp .env.example .env
 # fill in OPENAI_API_KEY or ANTHROPIC_API_KEY, and optionally TYPESAFE_API_KEY
+# -- or skip both and use MODEL_SERVER_URL for a free local/Colab model
+# instead, see "Running without an API key" below.
 # GOOGLE_API_KEY additionally enables Gemini as an embedding provider and
 # is required for Compare mode (see "Embedding provider comparison" below)
 
@@ -71,6 +73,35 @@ python chat.py             # terminal REPL against the fixed demo corpus
 no manual `export` step needed. If you exported these as real shell/CI
 environment variables instead, that still works too; `.env` never
 overrides a variable that's already set.
+
+## Running without an API key (free, via Ollama)
+
+No `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`? Set `MODEL_SERVER_URL` instead
+and this app runs entirely against a free model, with no code changes:
+
+1. Clone and run [cloudflare-ollama-bridge](https://github.com/furkandrms/cloudflare-ollama-bridge) --
+   its Colab notebook starts [Ollama](https://ollama.com) on Colab's free T4
+   GPU and exposes it through a [Cloudflare tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/trycloudflare/).
+   Running it prints a URL like `https://xxxx-xxxx.trycloudflare.com`.
+2. In this repo's `.env`, set:
+   ```ini
+   MODEL_SERVER_URL=https://xxxx-xxxx.trycloudflare.com
+   MODEL_NAME=qwen3:8b
+   ```
+3. Run `python chat.py` or `uvicorn app:app --reload` as usual -- generation,
+   query rewriting, clarification, and rag-guard's relevance/sufficiency/
+   grounding checks all go through the Ollama model. `make_client()` in
+   `pipeline_setup.py` picks this path automatically whenever neither
+   `OPENAI_API_KEY` nor `ANTHROPIC_API_KEY` is set.
+
+Works because Ollama exposes an OpenAI-compatible `/v1` API -- the OpenAI
+SDK is reused as-is, just pointed at the tunnel instead of `api.openai.com`.
+
+**Tradeoff:** the decision-model checks (relevance/sufficiency/grounding)
+use JSON-mode LLM calls under the hood, same as the `OPENAI_API_KEY` path.
+A small local model like `qwen3:8b` follows that format less reliably than
+`gpt-4o-mini` does -- expect occasional parse hiccups on those checks. Good
+for demos and free experimentation, not a drop-in production replacement.
 
 ## Web app
 

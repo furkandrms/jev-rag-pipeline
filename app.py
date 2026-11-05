@@ -70,6 +70,8 @@ from pydantic import BaseModel
 from pipeline_logging import stage_log
 from pipeline_setup import (
     EMBEDDING_PROVIDERS,
+    InvalidCustomBackend,
+    build_custom_ollama_backend,
     chunk_text,
     ensure_compare_collections,
     extract_text,
@@ -235,6 +237,13 @@ class ChatRequest(BaseModel):
     # instead of the default (OpenAI/Anthropic-backed) one -- same
     # thresholds, same pipeline stages, see _laya_guard() below.
     use_laya: bool = False
+    # Opt-in per-request switch to a visitor's own free Ollama tunnel
+    # (see cloudflare-ollama-bridge) instead of this server's default
+    # generation backend -- both must be given together, or neither.
+    # Validated against an allowlist in build_custom_ollama_backend()
+    # before any request is made to model_server_url.
+    model_server_url: str | None = None
+    model_name: str | None = None
 
 
 class SampleUploadRequest(BaseModel):
@@ -292,7 +301,14 @@ def _serialize_guard_report(report) -> dict:
     }
 
 
-def _run_pipeline(query: str, session_id: str, guard=None):
+def _run_pipeline(
+    query: str,
+    session_id: str,
+    guard=None,
+    make_generate_fn=None,
+    backend_variant: str = "default",
+    generate_model_name: str | None = None,
+):
     """Generator yielding (event_name, data) as each real pipeline stage completes.
 
     Mirrors RagGuard.run()'s own stage order exactly (see
@@ -302,19 +318,22 @@ def _run_pipeline(query: str, session_id: str, guard=None):
     each stage's completion (and real elapsed time) can be observed and
     streamed as it happens instead of only seeing the final result.
 
-    `guard` defaults to the app's default RagGuard (OpenAI/Anthropic-backed
-    decisions); the chat endpoints pass `_laya_guard()` instead when the
-    request opts into Laya -- same thresholds, same stage order, only
-    `guard.model` (and therefore every noul/choice call underneath) differs.
+    `guard` and `make_generate_fn` default to the app's default RagGuard
+    (OpenAI/Anthropic/Ollama-backed decisions) and `_make_upload_generate_fn`.
+    The chat endpoints pass Laya's guard, or a visitor's own custom-Ollama
+    guard + generate_fn factory (see build_custom_ollama_backend()), instead
+    when the request opts into one of those -- same thresholds, same stage
+    order, only the decision model (and generation backend) differs.
+    `backend_variant` identifies which of the three this call is, so the
+    response cache (see cache_key below) never serves back an answer from a
+    different backend for the same question text.
     """
-    # Must be captured before the None -> _guard fallback below: it's what
-    # keeps a Laya-decided answer from being served back for an identical
-    # query text asked again with the default guard (or vice versa) --
-    # same session, same text, different decision model, not the same
-    # answer. See the cache_key line further down.
-    using_laya = guard is not None
     if guard is None:
         guard = _guard
+    if make_generate_fn is None:
+        make_generate_fn = _make_upload_generate_fn
+    if generate_model_name is None:
+        generate_model_name = _backend_info.get("generate_model", _backend_info["generate_fn"])
     t_total = time.monotonic()
     stage_log(session_id, "query", f'"{query}"')
 
@@ -362,7 +381,7 @@ def _run_pipeline(query: str, session_id: str, guard=None):
         yield "error", {"detail": "No document uploaded yet for this session"}
         return
 
-    cache_key = (session_id, query.strip().lower(), using_laya)
+    cache_key = (session_id, query.strip().lower(), backend_variant)
     cached = _response_cache.get(cache_key)
     if cached is not None:
         elapsed = _elapsed_ms(t_total)
@@ -629,10 +648,10 @@ def _run_pipeline(query: str, session_id: str, guard=None):
 
     usage_sink: dict = {}
     t = time.monotonic()
-    generate_fn = _make_upload_generate_fn(usage_sink=usage_sink)
+    generate_fn = make_generate_fn(usage_sink=usage_sink)
     answer = generate_fn(generate_query, kept_chunks)
     elapsed = _elapsed_ms(t)
-    model_name = _backend_info.get("generate_model", _backend_info["generate_fn"])
+    model_name = generate_model_name
     tokens_in = usage_sink.get("input_tokens", "?")
     tokens_out = usage_sink.get("output_tokens", "?")
     stage_log(
@@ -640,7 +659,12 @@ def _run_pipeline(query: str, session_id: str, guard=None):
         "generation",
         f"{model_name} | in={tokens_in} out={tokens_out} tokens ({elapsed}ms) -> {answer[:100]!r}",
     )
-    yield "generation", {"answer": answer, "usage": usage_sink, "elapsed_ms": elapsed}
+    yield "generation", {
+        "answer": answer,
+        "usage": usage_sink,
+        "elapsed_ms": elapsed,
+        "model": model_name,
+    }
 
     grounding = None
     decision_calls = relevance_decision_calls + 1
@@ -828,6 +852,34 @@ def delete_document(x_session_id: str = Header(..., alias="X-Session-Id")) -> di
     return {"removed": True}
 
 
+def _resolve_backend(body: "ChatRequest"):
+    """Pick which guard/generate_fn a chat request should use: a visitor's
+    own custom Ollama tunnel (model_server_url + model_name both given)
+    takes priority, then Laya (use_laya=True), else the app's default.
+
+    Returns (guard, make_generate_fn, backend_variant, generate_model_name)
+    -- see _run_pipeline()'s docstring for what each means.
+    """
+    if body.model_server_url or body.model_name:
+        try:
+            make_generate_fn, guard = build_custom_ollama_backend(
+                body.model_server_url, body.model_name
+            )
+        except InvalidCustomBackend as exc:
+            raise HTTPException(400, str(exc)) from exc
+        backend_variant = f"custom:{body.model_server_url}:{body.model_name}"
+        return guard, make_generate_fn, backend_variant, body.model_name
+
+    if body.use_laya:
+        try:
+            guard = _laya_guard()
+        except Exception as exc:
+            raise HTTPException(503, f"Laya is unavailable right now: {exc}") from exc
+        return guard, _make_upload_generate_fn, "laya", None
+
+    return None, _make_upload_generate_fn, "default", None
+
+
 @app.post("/api/chat")
 def chat(body: ChatRequest, http_request: Request, x_session_id: str = Header(..., alias="X-Session-Id")) -> dict:
     x_session_id = _check_session_id(x_session_id)
@@ -836,15 +888,17 @@ def chat(body: ChatRequest, http_request: Request, x_session_id: str = Header(..
     if not query:
         return {"error": "empty query"}
 
-    guard = None
-    if body.use_laya:
-        try:
-            guard = _laya_guard()
-        except Exception as exc:
-            raise HTTPException(503, f"Laya is unavailable right now: {exc}") from exc
+    guard, make_generate_fn, backend_variant, generate_model_name = _resolve_backend(body)
 
     event, data = None, None
-    for event, data in _run_pipeline(query, x_session_id, guard=guard):
+    for event, data in _run_pipeline(
+        query,
+        x_session_id,
+        guard=guard,
+        make_generate_fn=make_generate_fn,
+        backend_variant=backend_variant,
+        generate_model_name=generate_model_name,
+    ):
         pass  # drain to the final event; intermediate stages are for /stream only
 
     if event == "error":
@@ -922,14 +976,19 @@ def chat_stream(body: ChatRequest, http_request: Request, x_session_id: str = He
         if not query:
             yield f"event: error\ndata: {json.dumps({'detail': 'empty query'})}\n\n"
             return
-        guard = None
-        if body.use_laya:
-            try:
-                guard = _laya_guard()
-            except Exception as exc:
-                yield f"event: error\ndata: {json.dumps({'detail': f'Laya is unavailable right now: {exc}'})}\n\n"
-                return
-        for event, data in _run_pipeline(query, x_session_id, guard=guard):
+        try:
+            guard, make_generate_fn, backend_variant, generate_model_name = _resolve_backend(body)
+        except HTTPException as exc:
+            yield f"event: error\ndata: {json.dumps({'detail': exc.detail})}\n\n"
+            return
+        for event, data in _run_pipeline(
+            query,
+            x_session_id,
+            guard=guard,
+            make_generate_fn=make_generate_fn,
+            backend_variant=backend_variant,
+            generate_model_name=generate_model_name,
+        ):
             yield f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
     return StreamingResponse(sse(), media_type="text/event-stream")
