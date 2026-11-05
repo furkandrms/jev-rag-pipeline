@@ -61,7 +61,16 @@ UPLOAD_SYSTEM_PROMPT = (
     "the question."
 )
 
-GENERATE_MODEL_NAMES = {"openai": "gpt-4o-mini", "anthropic": "claude-haiku-4-5"}
+GENERATE_MODEL_NAMES = {
+    "openai": "gpt-4o-mini",
+    "anthropic": "claude-haiku-4-5",
+    # Ollama exposes an OpenAI-compatible /v1 API, so the "ollama" backend
+    # reuses every "openai"-shaped call below as-is -- only the model name
+    # and base_url differ. Whatever tag was pulled in the Colab notebook
+    # (see cloudflare-ollama-bridge), matched here via the same MODEL_NAME
+    # env var that notebook's .env uses.
+    "ollama": os.environ.get("MODEL_NAME", "qwen3:8b"),
+}
 
 _chroma_client = None
 _embedding_function = None
@@ -527,9 +536,21 @@ def make_client() -> tuple[str, object]:
 
         return "anthropic", anthropic.Anthropic()
 
+    # Free path: a model server from cloudflare-ollama-bridge (Ollama on a
+    # Colab GPU, exposed through a Cloudflare tunnel). Ollama's /v1 API is
+    # OpenAI-compatible, so the OpenAI SDK itself is the client here too --
+    # just pointed at the tunnel instead of api.openai.com. The API key is
+    # a required-but-unchecked placeholder; Ollama ignores it.
+    if os.environ.get("MODEL_SERVER_URL"):
+        from openai import OpenAI
+
+        base_url = os.environ["MODEL_SERVER_URL"].rstrip("/") + "/v1"
+        return "ollama", OpenAI(base_url=base_url, api_key="ollama")
+
     print(
-        "Needs a real LLM to generate answers: set OPENAI_API_KEY or "
-        "ANTHROPIC_API_KEY (see .env.example).",
+        "Needs a real LLM to generate answers: set OPENAI_API_KEY, "
+        "ANTHROPIC_API_KEY, or MODEL_SERVER_URL for a free Ollama backend "
+        "(see .env.example and cloudflare-ollama-bridge).",
         file=sys.stderr,
     )
     raise SystemExit(1)
@@ -545,12 +566,13 @@ def build_generate_fn(
     "output_tokens": ...}`) -- the only way to surface it, since `GenerateFn`
     itself must return a plain string to satisfy RagGuard's contract.
     """
-    if backend == "openai":
+    if backend in ("openai", "ollama"):
+        # Same call shape for both: Ollama's /v1 API is OpenAI-compatible.
 
         def generate(query: str, chunks: list[Chunk]) -> str:
             context = "\n\n".join(f"[{c.id}] {c.text}" for c in chunks)
             response = client.chat.completions.create(
-                model=GENERATE_MODEL_NAMES["openai"],
+                model=GENERATE_MODEL_NAMES[backend],
                 messages=[
                     {
                         "role": "user",
@@ -632,9 +654,9 @@ def build_rewrite_fn(backend: str, client):
             f"{QUERY_REWRITE_SYSTEM_PROMPT}\n\nConversation so far:\n{convo}\n\n"
             f"Follow-up question: {query}\n\nStandalone question:"
         )
-        if backend == "openai":
+        if backend in ("openai", "ollama"):
             response = client.chat.completions.create(
-                model=GENERATE_MODEL_NAMES["openai"],
+                model=GENERATE_MODEL_NAMES[backend],
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=120,
             )
@@ -667,9 +689,9 @@ def build_clarify_fn(backend: str, client):
     def clarify(query: str, chunks: list[Chunk]) -> str:
         context = "\n\n".join(f"[{c.id}] {c.text}" for c in chunks)
         prompt = f"{CLARIFY_SYSTEM_PROMPT}\n\nRetrieved context:\n{context}\n\nQuestion: {query}"
-        if backend == "openai":
+        if backend in ("openai", "ollama"):
             response = client.chat.completions.create(
-                model=GENERATE_MODEL_NAMES["openai"],
+                model=GENERATE_MODEL_NAMES[backend],
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=120,
             )
@@ -693,6 +715,12 @@ def make_decision_model_for_client(backend: str, client) -> DecisionModel:
         return OpenAIDecisionModel(client=client)
     if backend == "anthropic":
         return AnthropicDecisionModel(client=client)
+    if backend == "ollama":
+        # Same OpenAI-compatible JSON-mode call as the "openai" case above,
+        # just against a smaller local model -- see make_client()'s comment
+        # on the tradeoff (JSON mode is less reliable on small models than
+        # on gpt-4o-mini).
+        return OpenAIDecisionModel(model=GENERATE_MODEL_NAMES["ollama"], client=client)
     raise ValueError(f"unknown backend: {backend}")
 
 
