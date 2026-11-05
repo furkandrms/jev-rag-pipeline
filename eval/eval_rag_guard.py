@@ -3,7 +3,7 @@
 This is not a demo -- it's the test this whole repo exists to run. It loads
 a real document, asks it a mix of in-scope, out-of-scope, and cross-topic
 questions through the *real* pipeline (real embeddings, real generation
-model, real Jev/LLM decision model -- whatever `pipeline_setup.setup()`
+model, real Jev/LLM decision model -- whatever `jevrag.setup.setup()`
 wires up), and checks that rag-guard's three stages behave the way they're
 supposed to:
 
@@ -35,8 +35,8 @@ section among its top-k results, independent of what rag-guard then did
 with it. A low recall@k with a passing action rate would mean the pipeline
 is accidentally right, not actually retrieving the correct material.
 
-Run:
-    python eval_rag_guard.py
+Run (from the repo root):
+    python -m eval.eval_rag_guard
 
 Needs the same .env as app.py (OPENAI_API_KEY and/or ANTHROPIC_API_KEY,
 optionally TYPESAFE_API_KEY) and JEV_RAG_Bilgi_Dokumani.pdf in test_pdf/.
@@ -50,7 +50,7 @@ import sys
 from collections import defaultdict
 from dataclasses import dataclass
 
-from pipeline_setup import (
+from jevrag.setup import (
     _add_chunks_in_batches,
     chunk_text,
     extract_text,
@@ -244,7 +244,7 @@ def load_collection(doc: Doc):
         client.delete_collection(doc.collection_name)
     except Exception:
         pass
-    # Same embedding function the real app uses (app.py/pipeline_setup.py),
+    # Same embedding function the real app uses (app.py/jevrag/setup.py),
     # not chromadb's local default -- otherwise this harness would be
     # testing a worse retrieval setup than what actually ships.
     collection = client.create_collection(doc.collection_name, embedding_function=get_embedding_function())

@@ -8,6 +8,6 @@ __pycache__
 !.env.example
 .DS_Store
 *.pdf
-test_pdf/
+eval/test_pdf/
 screenshots/
 *.md

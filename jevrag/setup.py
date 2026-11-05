@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
-from corpus import DOCUMENTS
+from jevrag.corpus import DOCUMENTS
 
 from rag_guard import Chunk, RagGuard
 from rag_guard.decision_model import (
@@ -966,8 +966,8 @@ def setup():
 # A second RagGuard, identical to setup()'s except for which DecisionModel
 # backs it, built lazily (only if/when a request actually opts in via
 # ChatRequest.use_laya) so a visitor who never touches the toggle never
-# pays Laya's checkpoint download/load cost. See laya_decision_model.py for
-# what this trades off against the default OpenAI/Anthropic-backed guard.
+# pays Laya's checkpoint download/load cost. See jevrag/laya.py for what
+# this trades off against the default OpenAI/Anthropic-backed guard.
 _laya_guard_instance: RagGuard | None = None
 _laya_guard_lock = threading.Lock()
 
@@ -977,7 +977,7 @@ def get_laya_guard() -> RagGuard:
     if _laya_guard_instance is None:
         with _laya_guard_lock:
             if _laya_guard_instance is None:
-                from laya_decision_model import LayaDecisionModel
+                from jevrag.laya import LayaDecisionModel
 
                 _laya_guard_instance = RagGuard(
                     model=LayaDecisionModel(),

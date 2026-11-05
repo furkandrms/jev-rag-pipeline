@@ -1,7 +1,7 @@
 """Optional decision-model backend: convaiinnovations/laya, a self-hosted,
 open-weight (Apache 2.0) typed-decision model -- an alternative to the
 OpenAI/Anthropic-backed DecisionModel this app defaults to. Opt-in per
-request via ChatRequest.use_laya (see app.py); pipeline_setup.get_laya_guard()
+request via ChatRequest.use_laya (see app.py); jevrag.setup.get_laya_guard()
 is what actually wires one of these into a RagGuard.
 
 Tradeoffs, measured locally before wiring this in:

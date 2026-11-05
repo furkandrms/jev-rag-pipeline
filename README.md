@@ -11,8 +11,24 @@ and grounding checks comes from rag-guard.
 
 ## What's here
 
-Two separate entry points, sharing the same pipeline wiring, plus the
-shared setup/logging modules and dev-only evaluation tooling:
+Two separate entry points at the repo root, sharing the same pipeline
+wiring from the `jevrag/` package, plus dev-only evaluation tooling under
+`eval/`:
+
+```
+app.py                     # entry point: the web app
+chat.py                    # entry point: terminal REPL
+jevrag/                    # shared package both entry points build on
+  setup.py                 #   backend selection, chunking, vector store
+  corpus.py                #   chat.py's fixed demo corpus
+  stage_logging.py         #   structured per-stage console logging
+  laya.py                  #   optional self-hosted decision-model backend
+eval/                      # dev-only, not part of the running app
+  eval_rag_guard.py        #   golden-set recall@k / pass-rate eval
+  eval_multi_embedding.py  #   same golden set, OpenAI vs. Gemini embeddings
+  test_pdf/                #   real documents the golden set is built from
+static/                    # the web app's frontend (no build step)
+```
 
 - **`app.py` + `static/` -- the web app.** Upload your own document
   (`.txt` / `.md` / `.pdf`) and chat against it. There is no built-in demo
@@ -27,28 +43,30 @@ shared setup/logging modules and dev-only evaluation tooling:
   not just its final answer.
 - **`chat.py` -- a terminal REPL**, separate from the web app, used to
   smoke-test rag-guard's pipeline wiring against a fixed corpus
-  (`corpus.py`: ~35 documents simulating a fictional company's internal
+  (`jevrag/corpus.py`: ~35 documents simulating a fictional company's internal
   engineering docs, deliberately messier than trivia facts so relevance
   filtering and the sufficiency gate have real work to do). This is a
   developer tool, not part of the product -- if you just want to try the
   app, use the web UI.
-- **`pipeline_setup.py`** -- shared setup (Chroma client, chunking, file
+- **`jevrag/setup.py`** -- shared setup (Chroma client, chunking, file
   text extraction, backend selection, embedding provider selection) both
   entry points build on, so they can't drift apart on how retrieval or
   generation works.
-- **`pipeline_logging.py`** -- structured per-stage console logging for
+- **`jevrag/stage_logging.py`** -- structured per-stage console logging for
   `app.py` (see "Server-side logging" below) -- what actually went in and
   out of rag-guard and the LLM, independent of what any one browser
   session's UI shows.
-- **`eval_rag_guard.py` / `eval_multi_embedding.py`** -- golden-set
-  evaluation scripts, not part of the running app. `eval_rag_guard.py`
-  runs a hand-built set of query/expected-decision cases (transcribed from
-  real test documents in `test_pdf/`) against the real pipeline and
-  reports recall@k and pass rate per case group. `eval_multi_embedding.py`
-  reruns the same golden set through OpenAI's and Gemini's embeddings in
-  parallel to check whether rag-guard reaches the same decision regardless
-  of which provider's retrieval fed it -- see "Embedding provider
-  comparison" below.
+- **`eval/eval_rag_guard.py` / `eval/eval_multi_embedding.py`** -- golden-set
+  evaluation scripts, not part of the running app. Run as modules from the
+  repo root (`python -m eval.eval_rag_guard`), not as plain scripts, since
+  they import the `jevrag` package. `eval_rag_guard.py` runs a hand-built
+  set of query/expected-decision cases (transcribed from real test
+  documents in `eval/test_pdf/`) against the real pipeline and reports
+  recall@k and pass rate per case group. `eval_multi_embedding.py` reruns
+  the same golden set through OpenAI's and Gemini's embeddings in parallel
+  to check whether rag-guard reaches the same decision regardless of which
+  provider's retrieval fed it -- see "Embedding provider comparison"
+  below.
 
 ## Setup
 
@@ -69,7 +87,7 @@ uvicorn app:app --reload   # web app at http://127.0.0.1:8000
 python chat.py             # terminal REPL against the fixed demo corpus
 ```
 
-`.env` is loaded automatically (via `python-dotenv`, in `pipeline_setup.py`) --
+`.env` is loaded automatically (via `python-dotenv`, in `jevrag/setup.py`) --
 no manual `export` step needed. If you exported these as real shell/CI
 environment variables instead, that still works too; `.env` never
 overrides a variable that's already set.
@@ -91,7 +109,7 @@ and this app runs entirely against a free model, with no code changes:
 3. Run `python chat.py` or `uvicorn app:app --reload` as usual -- generation,
    query rewriting, clarification, and rag-guard's relevance/sufficiency/
    grounding checks all go through the Ollama model. `make_client()` in
-   `pipeline_setup.py` picks this path automatically whenever neither
+   `jevrag/setup.py` picks this path automatically whenever neither
    `OPENAI_API_KEY` nor `ANTHROPIC_API_KEY` is set.
 
 Works because Ollama exposes an OpenAI-compatible `/v1` API -- the OpenAI
@@ -152,7 +170,7 @@ answer is only ever valid for the document it was computed against.
 - `GET /api/document-status` -- whether this session already has an
   uploaded document, its filename/chunk count, and the full chunk list.
 - `POST /api/upload` -- multipart file upload (`.txt`/`.md`/`.pdf`, 5 MB
-  max). The file is chunked (`pipeline_setup.chunk_text`: paragraph-packed
+  max). The file is chunked (`jevrag.setup.chunk_text`: paragraph-packed
   up to 800 chars, hard-split with overlap only for a single paragraph
   longer than that) and embedded into a Chroma collection scoped to the
   caller's `X-Session-Id` header, and the chunk list is returned so the UI
@@ -233,7 +251,7 @@ they're not interchangeable:
   still see the answer, just visibly marked as not fully backed by the
   document.
 
-`TOP_K` (`pipeline_setup.py`, 12 chunks per query by default) and
+`TOP_K` (`jevrag/setup.py`, 12 chunks per query by default) and
 `sufficiency_threshold` (0.45, lower than rag-guard's 0.6 default) are both
 tuned toward the second behavior on purpose: let generation run more
 often, and lean on grounding -- not sufficiency -- as the primary catch. A
@@ -264,7 +282,7 @@ boundaries, so a high-scoring chunk cut off mid-heading
 next chunk, which was never a retrieval candidate at all.
 
 The LLM/decision-model backend selection happens once at process startup
-(`pipeline_setup.setup()`), not per-request; per-session document
+(`jevrag.setup.setup()`), not per-request; per-session document
 metadata (filename, chunk count) is an in-memory dict in `app.py` that
 mirrors the in-memory Chroma client it describes -- both reset on process
 restart, which is fine for this scope (see "Known limitations" below).
@@ -297,7 +315,7 @@ for both providers' embedding time twice over. Retrieval and the two full
 thread per provider.
 
 Two real provider-specific constraints showed up building this and are
-handled in `pipeline_setup.py`: Gemini's `embedContent` batch endpoint
+handled in `jevrag/setup.py`: Gemini's `embedContent` batch endpoint
 rejects more than 100 inputs per call (`_add_chunks_in_batches` chunks any
 `collection.add()` into batches of 90), and its free tier separately
 rate-limits embedding requests per minute (generic retry with backoff,
@@ -311,7 +329,7 @@ the same session from each deciding the other's in-progress collection
 ### Server-side logging
 
 The browser's activity log only tells *you* what happened in your own
-session. `pipeline_logging.py` prints the same kind of per-stage detail
+session. `jevrag/stage_logging.py` prints the same kind of per-stage detail
 to the server console, for every request, independent of the UI --
 useful when `uvicorn app:app --reload` is the thing you're actually
 watching:
