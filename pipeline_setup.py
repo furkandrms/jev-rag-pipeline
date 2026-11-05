@@ -6,10 +6,12 @@ entry points never drift apart on how the pipeline gets wired.
 from __future__ import annotations
 
 import os
+import re
 import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
@@ -645,7 +647,11 @@ def make_client() -> tuple[str, object]:
 
 
 def build_generate_fn(
-    backend: str, client, system_prompt: str, usage_sink: dict | None = None
+    backend: str,
+    client,
+    system_prompt: str,
+    usage_sink: dict | None = None,
+    model: str | None = None,
 ) -> GenerateFn:
     """Build the generation closure for `backend`.
 
@@ -653,14 +659,19 @@ def build_generate_fn(
     API response written into it as a side effect (`{"input_tokens": ...,
     "output_tokens": ...}`) -- the only way to surface it, since `GenerateFn`
     itself must return a plain string to satisfy RagGuard's contract.
+
+    `model`, if given, overrides `GENERATE_MODEL_NAMES[backend]` -- used for
+    a per-request custom Ollama server (a visitor's own tunnel/model, not
+    the one this process started with), see `build_custom_ollama_client`.
     """
     if backend in ("openai", "ollama"):
         # Same call shape for both: Ollama's /v1 API is OpenAI-compatible.
+        model_name = model or GENERATE_MODEL_NAMES[backend]
 
         def generate(query: str, chunks: list[Chunk]) -> str:
             context = "\n\n".join(f"[{c.id}] {c.text}" for c in chunks)
             response = client.chat.completions.create(
-                model=GENERATE_MODEL_NAMES[backend],
+                model=model_name,
                 messages=[
                     {
                         "role": "user",
@@ -816,6 +827,80 @@ def make_decision_model(fallback: DecisionModel) -> tuple[str, DecisionModel]:
     if os.environ.get("TYPESAFE_API_KEY"):
         return "jev", JevDecisionModel()
     return "same as generate_fn", fallback
+
+
+# --- Custom per-request Ollama backend ---------------------------------------
+# Lets a single visitor use their own free Colab+cloudflare-ollama-bridge
+# tunnel for just their own requests, instead of (or when there is no)
+# whatever OPENAI_API_KEY/ANTHROPIC_API_KEY/MODEL_SERVER_URL this process
+# started with -- app.py's /api/chat(/stream) accept an optional
+# model_server_url/model_name and, if given, build this per-request instead
+# of using the module-level default. Same shape as the "Use Laya" toggle
+# (a per-request override), not a server-wide setting.
+class InvalidCustomBackend(ValueError):
+    pass
+
+
+# Same allowlist as cloudflare-ollama-bridge's own demo/app.py: a visitor
+# types this URL and we make a server-side request to it on their behalf --
+# a classic SSRF shape if left unvalidated (they could otherwise point this
+# server at an internal service or a cloud metadata endpoint). Restricted to
+# what this feature is actually for: a Cloudflare quick-tunnel host, or a
+# local Ollama instance.
+_CUSTOM_OLLAMA_HOST_RE = re.compile(r"^([a-z0-9-]+\.trycloudflare\.com|localhost|127\.0\.0\.1)$")
+_CUSTOM_OLLAMA_MODEL_RE = re.compile(r"^[A-Za-z0-9._:/-]{1,128}$")
+
+
+def validate_custom_ollama_target(server_url: str, model_name: str) -> tuple[str, str]:
+    """Validate and normalize a visitor-supplied tunnel URL + model name.
+
+    Raises InvalidCustomBackend with a message safe to show the visitor
+    directly (no internals) if either is missing or outside the allowlist.
+    """
+    server_url = (server_url or "").strip().rstrip("/")
+    model_name = (model_name or "").strip()
+
+    if not server_url:
+        raise InvalidCustomBackend("No tunnel URL given.")
+
+    parsed = urlparse(server_url)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme not in ("http", "https") or not _CUSTOM_OLLAMA_HOST_RE.match(host):
+        raise InvalidCustomBackend(
+            "Refused: tunnel URL must be a *.trycloudflare.com tunnel, or "
+            f"localhost/127.0.0.1 -- got {host or '(none)'!r}."
+        )
+    if not model_name or not _CUSTOM_OLLAMA_MODEL_RE.match(model_name):
+        raise InvalidCustomBackend("Refused: model name is missing or contains unexpected characters.")
+    return server_url, model_name
+
+
+def build_custom_ollama_backend(server_url: str, model_name: str):
+    """Build a one-off (generate_fn_factory, RagGuard) pair for a
+    visitor-supplied tunnel URL + model name, validated against the same
+    allowlist as `validate_custom_ollama_target`.
+
+    `generate_fn_factory(usage_sink=None)` mirrors `make_upload_generate_fn`
+    from `setup()` -- a factory, not a fixed function, so app.py can build a
+    fresh one per request with a new usage_sink dict.
+    """
+    server_url, model_name = validate_custom_ollama_target(server_url, model_name)
+    from openai import OpenAI
+
+    client = OpenAI(base_url=f"{server_url}/v1", api_key="ollama")
+
+    def generate_fn_factory(usage_sink: dict | None = None) -> GenerateFn:
+        return build_generate_fn(
+            "ollama", client, UPLOAD_SYSTEM_PROMPT, usage_sink=usage_sink, model=model_name
+        )
+
+    guard = RagGuard(
+        model=OpenAIDecisionModel(model=model_name, client=client),
+        sufficiency_threshold=0.45,
+        partial_sufficiency_threshold=0.5,
+        rerank_by_relevance=True,
+    )
+    return generate_fn_factory, guard
 
 
 def setup():

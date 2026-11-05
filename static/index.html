@@ -10,7 +10,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/style.css?v=5" />
+  <link rel="stylesheet" href="/static/style.css?v=7" />
 </head>
 <body>
   <div class="app">
@@ -48,6 +48,37 @@
           <div class="sample-docs-grid" id="sample-docs-grid"></div>
         </div>
       </div>
+
+      <div class="custom-model-card">
+        <div class="custom-model-card-head">
+          <h2>No OpenAI/Anthropic API key?</h2>
+          <span class="custom-model-status" id="custom-model-status" hidden>Connected</span>
+        </div>
+        <p class="custom-model-card-info">
+          Run <a href="https://ollama.com" target="_blank" rel="noopener">Ollama</a> for free on
+          Google Colab's GPU and connect it here instead — this only affects
+          <strong>your own</strong> questions in this browser, nothing changes
+          for anyone else using this app.
+        </p>
+        <a class="custom-model-colab-link" href="https://colab.research.google.com/github/furkandrms/cloudflare-ollama-bridge/blob/main/notebooks/colab_ollama_tunnel.ipynb" target="_blank" rel="noopener">
+          1. Open the Colab notebook and run it ↗
+        </a>
+        <div class="custom-model-fields">
+          <label class="custom-model-field">
+            2. Tunnel URL it prints
+            <input type="text" id="custom-model-url" placeholder="https://xxxx-xxxx.trycloudflare.com" autocomplete="off" />
+          </label>
+          <label class="custom-model-field">
+            3. Model name
+            <input type="text" id="custom-model-name" placeholder="qwen3:8b" autocomplete="off" />
+          </label>
+        </div>
+        <label class="custom-model-enable">
+          <input type="checkbox" id="custom-model-enable" />
+          Use this free model for my questions instead of the server's default
+        </label>
+        <p class="custom-model-error" id="custom-model-error" hidden></p>
+      </div>
     </main>
 
     <!-- View B: shown once a document is uploaded for this session -->
@@ -70,6 +101,7 @@
           </label>
           <span class="laya-switch-help" id="laya-switch-help">No GPU on this server: answers take noticeably longer.</span>
         </div>
+
         <button type="button" class="doc-change-btn" id="doc-change-btn">Remove document</button>
       </div>
 
@@ -168,6 +200,6 @@
     </div>
   </template>
 
-  <script src="/static/app.js?v=5"></script>
+  <script src="/static/app.js?v=6"></script>
 </body>
 </html>
